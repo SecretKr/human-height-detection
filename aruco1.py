@@ -23,6 +23,7 @@ def main():
     capture_display = None
     distance = None
     focal_length = None
+    marker_corners = None
     
     # ArUco setup
     MARKER_SIZE = 6  # cm
@@ -77,7 +78,6 @@ def main():
                         dist_coef = np.zeros((4, 1))
                         rvec, tvec, _ = aruco.estimatePoseSingleMarkers(corners, MARKER_SIZE, cam_mat, dist_coef)
                         distance = math.sqrt(tvec[0][0][0]**2 + tvec[0][0][1]**2 + tvec[0][0][2]**2)
-                        cv2.aruco.drawDetectedMarkers(frame, marker_corners)
                 else:
                     distance = None
                     focal_length = None
@@ -111,6 +111,8 @@ def main():
                 if is_cut_off:
                     cv2.putText(display_frame, warning_message, (w//2 - 150, 40), 
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 3)
+            if marker_corners is not None:
+                cv2.aruco.drawDetectedMarkers(display_frame, marker_corners)
 
             # --- LIVE STATE LOGIC ---
             if current_state == STATE_LIVE:
@@ -134,52 +136,51 @@ def main():
                     cv2.imshow("Height Detector", display_frame)
                 
                 else:
-                    if person_bbox is not None:
-                        if is_cut_off:
-                            capture_display = frame.copy()
-                            cv2.putText(capture_display, "ERROR: Capture aborted.", (10, 40), 
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-                            cv2.putText(capture_display, warning_message, (10, 80), 
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-                        else:
-                            print("Capturing high-res frame and processing SAM mask...")
-                            pad = 10
-                            px1, py1 = max(0, person_bbox[0] - pad), max(0, person_bbox[1] - pad)
-                            px2, py2 = min(w, person_bbox[2] + pad), min(h, person_bbox[3] + pad)
-                            padded_bbox = [[px1, py1, px2, py2]] 
+                    if distance is not None and focal_length is not None:
+                        if person_bbox is not None:
+                            if is_cut_off:
+                                capture_display = frame.copy()
+                                cv2.putText(capture_display, "ERROR: Capture aborted.", (10, 40), 
+                                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                                cv2.putText(capture_display, warning_message, (10, 80), 
+                                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                            else:
+                                print("Capturing high-res frame and processing SAM mask...")
+                                pad = 10
+                                px1, py1 = max(0, person_bbox[0] - pad), max(0, person_bbox[1] - pad)
+                                px2, py2 = min(w, person_bbox[2] + pad), min(h, person_bbox[3] + pad)
+                                padded_bbox = [[px1, py1, px2, py2]] 
 
-                            # SAM processes the original HIGH-RES 'frame', not a downscaled one
-                            sam_results = sam_model(frame, bboxes=padded_bbox, device='mps', verbose=False)
-                            capture_display = frame.copy()
-                            
-                            if sam_results[0].masks is not None and len(sam_results[0].masks.xy) > 0:
-                                polygon = sam_results[0].masks.xy[0]
-                                highest_y = int(np.min(polygon[:, 1]))
-                                lowest_y = int(np.max(polygon[:, 1]))
-                                center_x = int(np.mean(polygon[:, 0]))
+                                # SAM processes the original HIGH-RES 'frame', not a downscaled one
+                                sam_results = sam_model(frame, bboxes=padded_bbox, device='mps', verbose=False)
+                                capture_display = frame.copy()
                                 
-                                pixel_height = lowest_y - highest_y
-
-                                if distance and focal_length:
-                                    estimated_height = (pixel_height * distance) / focal_length
+                                if sam_results[0].masks is not None and len(sam_results[0].masks.xy) > 0:
+                                    polygon = sam_results[0].masks.xy[0]
+                                    highest_y = int(np.min(polygon[:, 1]))
+                                    lowest_y = int(np.max(polygon[:, 1]))
+                                    center_x = int(np.mean(polygon[:, 0]))
                                     
+                                    pixel_height = lowest_y - highest_y
+
+                                    estimated_height = (pixel_height * distance) / focal_length
+                                        
                                     cv2.circle(capture_display, (center_x, highest_y), 5, (0, 0, 255), -1)
                                     cv2.circle(capture_display, (center_x, lowest_y), 5, (0, 0, 255), -1)
                                     cv2.line(capture_display, (center_x, highest_y), (center_x, lowest_y), (255, 0, 0), 2)
-                                    
+                                        
                                     cv2.putText(capture_display, f"Height: {estimated_height:.2f} cm", (10, 40), 
-                                                cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 3)
+                                                    cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 3)
                                 else:
-                                    cv2.putText(capture_display, "Height estimation failed: No distance data", (10, 40), 
+                                    cv2.putText(capture_display, "SAM Error: No mask generated", (10, 40), 
                                                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-                            else:
-                                cv2.putText(capture_display, "SAM Error: No mask generated", (10, 40), 
-                                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                        else:
+                            capture_display = frame.copy()
+                            cv2.putText(capture_display, "Capture failed: Target lost", (10, 40), 
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                     else:
-                        capture_display = frame.copy()
-                        cv2.putText(capture_display, "Capture failed: Target lost", (10, 40), 
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-
+                        cv2.putText(capture_display, "ArUco Error: No marker detected", (10, 40), 
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
                     cv2.putText(capture_display, "Press 'c' to return to live feed", (10, h - 30), 
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                     current_state = STATE_RESULT
