@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Human Height Detection</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="header">
+            <h1>Human Height Detection</h1>
+            <p class="subtitle">YOLO &bull; SAM &bull; ArUco</p>
+            <nav class="nav-tabs">
+                <a href="/" class="nav-tab active">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg>
+                    Height Detector
+                </a>
+                <a href="/aruco" class="nav-tab">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><rect x="7" y="7" width="3" height="3"/><rect x="14" y="7" width="3" height="3"/><rect x="7" y="14" width="3" height="3"/><rect x="14" y="14" width="3" height="3"/></svg>
+                    ArUco Generator
+                </a>
+            </nav>
+        </header>
+
+        <!-- Main Content -->
+        <div class="main-content">
+            <!-- Video Panel -->
+            <div class="video-panel">
+                <div class="video-container" id="videoContainer">
+                    <img id="videoFeed" alt="Video Feed">
+                    <div class="video-placeholder" id="videoPlaceholder">
+                        <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                            <path d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"/>
+                        </svg>
+                        <p>Click "Start Camera" to begin</p>
+                    </div>
+                    <!-- Countdown overlay -->
+                    <div class="countdown-overlay" id="countdownOverlay">
+                        <span id="countdownNumber">3</span>
+                    </div>
+                </div>
+
+                <!-- Controls -->
+                <div class="controls">
+                    <button id="btnStart" class="btn btn-primary">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"/>
+                        </svg>
+                        Start Camera
+                    </button>
+                    <button id="btnStop" class="btn btn-secondary" disabled>
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <rect x="6" y="6" width="12" height="12" rx="1"/>
+                        </svg>
+                        Stop
+                    </button>
+                    <button id="btnCapture" class="btn btn-accent" disabled>
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="12" cy="12" r="10"/>
+                            <circle cx="12" cy="12" r="4" fill="currentColor"/>
+                        </svg>
+                        Measure Height
+                    </button>
+                </div>
+            </div>
+
+            <!-- Info Panel -->
+            <div class="info-panel">
+                <!-- Status Card -->
+                <div class="card">
+                    <h3>Live Status</h3>
+                    <div class="status-grid">
+                        <div class="status-item">
+                            <span class="status-label">Camera</span>
+                            <span class="status-value" id="statusCamera">
+                                <span class="dot dot-red"></span> Offline
+                            </span>
+                        </div>
+                        <div class="status-item">
+                            <span class="status-label">Person</span>
+                            <span class="status-value" id="statusPerson">
+                                <span class="dot dot-gray"></span> --
+                            </span>
+                        </div>
+                        <div class="status-item">
+                            <span class="status-label">ArUco Marker</span>
+                            <span class="status-value" id="statusAruco">
+                                <span class="dot dot-gray"></span> --
+                            </span>
+                        </div>
+                        <div class="status-item">
+                            <span class="status-label">Distance</span>
+                            <span class="status-value" id="statusDistance">--</span>
+                        </div>
+                    </div>
+                    <div class="warning-bar" id="warningBar" style="display:none;">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
+                            <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+                        </svg>
+                        <span id="warningText"></span>
+                    </div>
+                </div>
+
+                <!-- Result Card -->
+                <div class="card result-card" id="resultCard" style="display:none;">
+                    <h3>Measurement Result</h3>
+                    <div class="result-image-container">
+                        <img id="resultImage" alt="Result">
+                    </div>
+                    <div class="result-height" id="resultHeight">--</div>
+                    <div class="result-details">
+                        <div class="detail-row">
+                            <span>Pixel Height</span>
+                            <span id="resultPixels">--</span>
+                        </div>
+                        <div class="detail-row">
+                            <span>Distance to Subject</span>
+                            <span id="resultDistance">--</span>
+                        </div>
+                    </div>
+                    <button class="btn btn-secondary btn-full" id="btnDismiss">Dismiss</button>
+                </div>
+
+                <!-- Instructions Card -->
+                <div class="card">
+                    <h3>How to Use</h3>
+                    <ol class="instructions-list">
+                        <li>Place a <strong>6cm ArUco marker</strong> (6x6_50 dictionary) visible in the scene</li>
+                        <li>Click <strong>Start Camera</strong> to begin the live feed</li>
+                        <li>Wait for a person & ArUco marker to be detected (green indicators)</li>
+                        <li>Ensure the full body is visible (head to feet)</li>
+                        <li>Click <strong>Measure Height</strong> to capture & estimate</li>
+                    </ol>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.min.js"></script>
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
