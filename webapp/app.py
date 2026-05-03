@@ -27,6 +27,7 @@ param_markers = aruco.DetectorParameters()
 aruco_detector = aruco.ArucoDetector(marker_dict, param_markers)
 
 # Detection state
+CONF_THRESHOLD = 0.6
 EDGE_MARGIN = 15
 frame_count = 0
 skip_rate = 3
@@ -36,6 +37,8 @@ warning_message = ""
 distance = None
 focal_length = None
 marker_corners = None
+all_persons = []
+selected_person_idx = -1
 
 
 def get_device():
@@ -93,7 +96,7 @@ def generate_aruco():
 
 @socketio.on("start_stream")
 def handle_start_stream():
-    global cap, streaming, frame_count, person_bbox, is_cut_off, warning_message, distance, focal_length, marker_corners
+    global cap, streaming, frame_count, person_bbox, is_cut_off, warning_message, distance, focal_length, marker_corners, all_persons, selected_person_idx
 
     if streaming:
         return
@@ -114,6 +117,8 @@ def handle_start_stream():
     distance = None
     focal_length = None
     marker_corners = None
+    all_persons = []
+    selected_person_idx = -1
 
     emit("stream_started")
     print("Stream started")
@@ -123,7 +128,7 @@ def handle_start_stream():
 
 
 def stream_loop():
-    global cap, streaming, frame_count, person_bbox, is_cut_off, distance, focal_length, marker_corners, warning_message
+    global cap, streaming, frame_count, person_bbox, is_cut_off, distance, focal_length, marker_corners, warning_message, all_persons, selected_person_idx
 
     while streaming and cap is not None and cap.isOpened():
         ret, frame = cap.read()
@@ -138,7 +143,7 @@ def stream_loop():
 
         # YOLO + ArUco detection on every nth frame
         if frame_count % skip_rate == 0:
-            results = yolo_model(frame, classes=[0], device=device, imgsz=320, verbose=False)
+            results = yolo_model(frame, classes=[0], device=device, imgsz=320, conf=CONF_THRESHOLD, verbose=False)
 
             # Detect ArUco markers
             detected_corners, marker_IDs, _ = aruco_detector.detectMarkers(gray_frame)
@@ -170,10 +175,31 @@ def stream_loop():
                 focal_length = None
 
             if len(results[0].boxes) > 0:
-                box = results[0].boxes[0]
-                x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
-                person_bbox = [x1, y1, x2, y2]
+                frame_center_x = w / 2
+                frame_center_y = h / 2
+                min_dist = float('inf')
+                
+                # Clear previous frame's list
+                all_persons = []
+                
+                # Find the person closest to the middle
+                for i, box in enumerate(results[0].boxes):
+                    x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+                    all_persons.append([x1, y1, x2, y2])
+                    
+                    box_center_x = (x1 + x2) / 2
+                    box_center_y = (y1 + y2) / 2
+                    
+                    # Calculate Euclidean distance to frame center
+                    dist = math.hypot(box_center_x - frame_center_x, box_center_y - frame_center_y)
+                    
+                    if dist < min_dist:
+                        min_dist = dist
+                        person_bbox = [x1, y1, x2, y2]
+                        selected_person_idx = i
 
+                # Edge check ONLY for the selected person
+                x1, y1, x2, y2 = person_bbox
                 if y1 <= EDGE_MARGIN:
                     is_cut_off = True
                     warning_message = "Head is cut off!"
@@ -185,13 +211,21 @@ def stream_loop():
                     warning_message = ""
             else:
                 person_bbox = None
+                all_persons = []
+                selected_person_idx = -1
                 is_cut_off = False
                 warning_message = ""
 
-        # Draw bounding box
-        if person_bbox is not None:
-            x1, y1, x2, y2 = person_bbox
-            color = (0, 0, 255) if is_cut_off else (0, 255, 0)
+        # Draw all bounding boxes
+        for i, bbox in enumerate(all_persons):
+            x1, y1, x2, y2 = bbox
+            if i == selected_person_idx:
+                # The selected (centered) person
+                color = (0, 0, 255) if is_cut_off else (0, 255, 0) # Red if cut off, Green if good
+            else:
+                # Other people Yellow
+                color = (0, 255, 255)
+                
             cv2.rectangle(display_frame, (x1, y1), (x2, y2), color, 2)
 
         # Draw ArUco markers
@@ -320,5 +354,5 @@ def handle_disconnect():
 
 if __name__ == "__main__":
     load_models()
-    print("\nStarting web app at http://localhost:5000")
-    socketio.run(app, host="0.0.0.0", port=5000, debug=False)
+    print("\nStarting web app at http://localhost:5001")
+    socketio.run(app, host="0.0.0.0", port=5001, debug=False)
