@@ -11,11 +11,14 @@ document.addEventListener("DOMContentLoaded", () => {
     const btnStop = document.getElementById("btnStop");
     const btnCapture = document.getElementById("btnCapture");
     const btnDismiss = document.getElementById("btnDismiss");
+    const detectionMode = document.getElementById("detectionMode");
 
     const statusCamera = document.getElementById("statusCamera");
     const statusPerson = document.getElementById("statusPerson");
     const statusAruco = document.getElementById("statusAruco");
     const statusDistance = document.getElementById("statusDistance");
+    const statusA4 = document.getElementById("statusA4");
+    const statusScale = document.getElementById("statusScale");
     const warningBar = document.getElementById("warningBar");
     const warningText = document.getElementById("warningText");
 
@@ -24,13 +27,14 @@ document.addEventListener("DOMContentLoaded", () => {
     const resultHeight = document.getElementById("resultHeight");
     const resultPixels = document.getElementById("resultPixels");
     const resultDistance = document.getElementById("resultDistance");
+    const resultCalibrationLabel = document.getElementById("resultCalibrationLabel");
 
     let isStreaming = false;
     let countdownTimer = null;
 
     // --- Button Handlers ---
     btnStart.addEventListener("click", () => {
-        socket.emit("start_stream");
+        socket.emit("start_stream", { mode: detectionMode.value });
         btnStart.disabled = true;
         statusCamera.innerHTML = '<span class="dot dot-yellow"></span> Connecting...';
         videoPlaceholder.querySelector("p").textContent = "Connecting to webcam...";
@@ -75,6 +79,7 @@ document.addEventListener("DOMContentLoaded", () => {
         videoPlaceholder.style.display = "none";
         btnStart.disabled = true;
         btnStop.disabled = false;
+        detectionMode.disabled = true;
         statusCamera.innerHTML = '<span class="dot dot-green"></span> Live';
     });
 
@@ -94,13 +99,38 @@ document.addEventListener("DOMContentLoaded", () => {
             statusPerson.innerHTML = '<span class="dot dot-gray"></span> Not found';
         }
 
+        const mode = status.detection_mode || detectionMode.value;
+
         // ArUco status
-        if (status.aruco_detected) {
-            statusAruco.innerHTML = '<span class="dot dot-green"></span> Detected';
-            statusDistance.textContent = status.distance + " cm";
+        if (mode === "aruco") {
+            if (status.aruco_detected) {
+                statusAruco.innerHTML = '<span class="dot dot-green"></span> Detected';
+                statusDistance.textContent = status.distance + " cm";
+            } else {
+                statusAruco.innerHTML = '<span class="dot dot-gray"></span> Not found';
+                statusDistance.textContent = "--";
+            }
         } else {
-            statusAruco.innerHTML = '<span class="dot dot-gray"></span> Not found';
+            statusAruco.innerHTML = '<span class="dot dot-gray"></span> --';
             statusDistance.textContent = "--";
+        }
+
+        // A4 status
+        if (mode === "a4") {
+            if (status.a4_detected) {
+                statusA4.innerHTML = '<span class="dot dot-green"></span> Detected';
+                if (status.a4_cm_per_px) {
+                    statusScale.textContent = status.a4_cm_per_px + " cm/px";
+                } else {
+                    statusScale.textContent = "--";
+                }
+            } else {
+                statusA4.innerHTML = '<span class="dot dot-gray"></span> Not found';
+                statusScale.textContent = "--";
+            }
+        } else {
+            statusA4.innerHTML = '<span class="dot dot-gray"></span> --';
+            statusScale.textContent = "--";
         }
 
         // Warning
@@ -112,7 +142,8 @@ document.addEventListener("DOMContentLoaded", () => {
         }
 
         // Enable capture when person is fully visible
-        const canCapture = status.person_detected && !status.is_cut_off;
+        const canCapture = status.person_detected && !status.is_cut_off &&
+            ((mode === "aruco" && status.aruco_detected) || (mode === "a4" && status.a4_detected));
         btnCapture.disabled = !canCapture;
     });
 
@@ -123,7 +154,13 @@ document.addEventListener("DOMContentLoaded", () => {
             resultImage.src = "data:image/jpeg;base64," + data.image;
             resultHeight.textContent = data.height_cm + " cm";
             resultPixels.textContent = data.pixel_height + " px";
-            resultDistance.textContent = data.distance_cm + " cm";
+            if (data.detection_mode === "a4") {
+                resultCalibrationLabel.textContent = "Scale";
+                resultDistance.textContent = data.cm_per_px ? data.cm_per_px + " cm/px" : "--";
+            } else {
+                resultCalibrationLabel.textContent = "Distance to Subject";
+                resultDistance.textContent = data.distance_cm + " cm";
+            }
             resultCard.style.display = "block";
         } else {
             alert("Capture failed: " + data.error);
@@ -140,6 +177,7 @@ document.addEventListener("DOMContentLoaded", () => {
         btnStart.disabled = false;
         btnStop.disabled = true;
         btnCapture.disabled = true;
+        detectionMode.disabled = false;
     });
 
     socket.on("disconnect", () => {
@@ -162,6 +200,8 @@ document.addEventListener("DOMContentLoaded", () => {
         statusPerson.innerHTML = '<span class="dot dot-gray"></span> --';
         statusAruco.innerHTML = '<span class="dot dot-gray"></span> --';
         statusDistance.textContent = "--";
+        statusA4.innerHTML = '<span class="dot dot-gray"></span> --';
+        statusScale.textContent = "--";
         warningBar.style.display = "none";
     }
 });
