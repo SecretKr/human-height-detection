@@ -1,2 +1,4 @@
 .DS_Store
 *.pt
+/results
+/__pycache__
