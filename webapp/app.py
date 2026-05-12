@@ -18,11 +18,12 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 # --- Global State ---
 yolo_model = None
 card_model = None
+a4paper_model = None
 sam_model = None
 device = None
 cap = None
 streaming = False
-detection_mode = "aruco"  # "aruco" or "card"
+detection_mode = "aruco"  # "aruco", "card", or "a4paper"
 
 # ArUco setup
 MARKER_SIZE = 6  # cm
@@ -34,6 +35,7 @@ aruco_detector = aruco.ArucoDetector(marker_dict, param_markers)
 CONF_THRESHOLD = 0.6
 EDGE_MARGIN = 15
 CARD_REAL_LENGTH = 8.56  # cm — standard ISO ID card
+A4_REAL_LENGTH = 29.7   # cm — A4 paper long side
 frame_count = 0
 skip_rate = 3
 person_bbox = None
@@ -45,6 +47,9 @@ marker_corners = None
 all_persons = []
 selected_person_idx = -1
 card_bbox = None
+a4paper_bbox = None
+a4paper_pixel_length = None
+a4paper_obb_corners = None
 
 
 def get_device():
@@ -59,7 +64,7 @@ def get_device():
 
 
 def load_models():
-    global yolo_model, card_model, sam_model, device
+    global yolo_model, card_model, a4paper_model, sam_model, device
     device = get_device()
     print(f"Using device: {device}")
     print("Loading YOLO and SAM models...")
@@ -71,6 +76,9 @@ def load_models():
         print("Downloading card detection model...")
         gdown.download(id="1Hr5vKGWuItkoVsP--1ghqJ2sZiBsSNDL", output=card_model_path)
     card_model = YOLO(card_model_path)
+    # Load A4 paper OBB detection model
+    a4paper_model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "model", "a4paper.pt")
+    a4paper_model = YOLO(a4paper_model_path)
     print("Models loaded successfully.")
 
 
@@ -111,20 +119,23 @@ def set_mode():
     global detection_mode, card_bbox, distance, focal_length, marker_corners
     data = request.json
     mode = data.get("mode") if data else None
-    if mode not in ("aruco", "card"):
-        return jsonify({"error": "Invalid mode. Use 'aruco' or 'card'."}), 400
+    if mode not in ("aruco", "card", "a4paper"):
+        return jsonify({"error": "Invalid mode. Use 'aruco', 'card', or 'a4paper'."}), 400
     detection_mode = mode
     # Reset reference detection state
     card_bbox = None
     distance = None
     focal_length = None
     marker_corners = None
+    a4paper_bbox = None
+    a4paper_pixel_length = None
+    a4paper_obb_corners = None
     return jsonify({"mode": detection_mode})
 
 
 @socketio.on("start_stream")
 def handle_start_stream():
-    global cap, streaming, frame_count, person_bbox, is_cut_off, warning_message, distance, focal_length, marker_corners, all_persons, selected_person_idx, card_bbox
+    global cap, streaming, frame_count, person_bbox, is_cut_off, warning_message, distance, focal_length, marker_corners, all_persons, selected_person_idx, card_bbox, a4paper_bbox, a4paper_pixel_length, a4paper_obb_corners
 
     if streaming:
         return
@@ -148,6 +159,9 @@ def handle_start_stream():
     all_persons = []
     selected_person_idx = -1
     card_bbox = None
+    a4paper_bbox = None
+    a4paper_pixel_length = None
+    a4paper_obb_corners = None
 
     emit("stream_started")
     print("Stream started")
@@ -157,7 +171,7 @@ def handle_start_stream():
 
 
 def stream_loop():
-    global cap, streaming, frame_count, person_bbox, is_cut_off, distance, focal_length, marker_corners, warning_message, all_persons, selected_person_idx, card_bbox
+    global cap, streaming, frame_count, person_bbox, is_cut_off, distance, focal_length, marker_corners, warning_message, all_persons, selected_person_idx, card_bbox, a4paper_bbox, a4paper_pixel_length, a4paper_obb_corners
 
     while streaming and cap is not None and cap.isOpened():
         ret, frame = cap.read()
@@ -214,6 +228,20 @@ def stream_loop():
                     card_bbox = [cx1, cy1, cx2, cy2]
                 else:
                     card_bbox = None
+
+            elif detection_mode == "a4paper":
+                # Detect A4 paper using OBB model
+                a4_results = a4paper_model(frame, imgsz=640, verbose=False)
+                if a4_results[0].obb is not None and len(a4_results[0].obb) > 0:
+                    xywhr = a4_results[0].obb.xywhr[0].tolist()
+                    w_px, h_px = xywhr[2], xywhr[3]
+                    a4paper_pixel_length = max(w_px, h_px)  # longer side = 29.7 cm
+                    a4paper_bbox = list(map(int, a4_results[0].obb.xyxy[0].tolist()))
+                    a4paper_obb_corners = a4_results[0].obb.xyxyxyxy[0].cpu().numpy().astype(int)
+                else:
+                    a4paper_bbox = None
+                    a4paper_pixel_length = None
+                    a4paper_obb_corners = None
 
             if len(results[0].boxes) > 0:
                 frame_center_x = w / 2
@@ -281,6 +309,13 @@ def stream_loop():
             cv2.putText(display_frame, "Card", (cx1, cy1 - 8),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
+        # Draw A4 paper OBB (a4paper mode only)
+        if detection_mode == "a4paper" and a4paper_obb_corners is not None:
+            cv2.polylines(display_frame, [a4paper_obb_corners.reshape(-1, 1, 2)], True, (255, 165, 0), 2)
+            if a4paper_bbox is not None:
+                cv2.putText(display_frame, "A4 Paper", (a4paper_bbox[0], a4paper_bbox[1] - 8),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 165, 0), 2)
+
         # Build status info
         status = {
             "mode": detection_mode,
@@ -293,6 +328,8 @@ def stream_loop():
             "distance": round(distance, 1) if distance else None,
             # Card
             "card_detected": card_bbox is not None,
+            # A4 paper
+            "a4paper_detected": a4paper_bbox is not None,
         }
 
         frame_data = encode_frame(display_frame)
@@ -318,7 +355,7 @@ def handle_stop_stream():
 
 @socketio.on("capture")
 def handle_capture():
-    global cap, streaming, person_bbox, is_cut_off, distance, focal_length, all_persons, card_bbox
+    global cap, streaming, person_bbox, is_cut_off, distance, focal_length, all_persons, card_bbox, a4paper_bbox, a4paper_pixel_length
 
     if not streaming or cap is None or not cap.isOpened():
         emit("capture_result", {"success": False, "error": "Stream not active"})
@@ -336,6 +373,8 @@ def handle_capture():
         _capture_aruco()
     elif detection_mode == "card":
         _capture_card()
+    elif detection_mode == "a4paper":
+        _capture_a4paper()
 
 
 def _capture_aruco():
@@ -481,6 +520,90 @@ def _capture_card():
             "image": frame_data,
             "persons": results_list,
             "card_pixel_length": card_pixel_length,
+        })
+    else:
+        emit("capture_result", {"success": False, "error": "SAM failed to generate masks for any person"})
+
+
+def _capture_a4paper():
+    """Capture and measure height for all detected persons using A4 paper as reference."""
+    if a4paper_bbox is None or a4paper_pixel_length is None:
+        emit("capture_result", {"success": False, "error": "No A4 paper detected. Hold an A4 sheet visible in the scene."})
+        return
+
+    ret, frame = cap.read()
+    if not ret:
+        emit("capture_result", {"success": False, "error": "Failed to capture frame"})
+        return
+
+    h, w = frame.shape[:2]
+
+    if a4paper_pixel_length < 10:
+        emit("capture_result", {"success": False, "error": "A4 paper too small in frame, move closer"})
+        return
+
+    persons_to_process = all_persons if all_persons else ([person_bbox] if person_bbox else [])
+
+    result_frame = frame.copy()
+
+    # Draw A4 paper OBB on result
+    if a4paper_obb_corners is not None:
+        cv2.polylines(result_frame, [a4paper_obb_corners.reshape(-1, 1, 2)], True, (255, 165, 0), 2)
+    ax1, ay1 = a4paper_bbox[0], a4paper_bbox[1]
+    cv2.putText(result_frame, "A4 Paper", (ax1, ay1 - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 165, 0), 2)
+
+    person_colors = [(255, 120, 0), (0, 120, 255), (120, 255, 0), (255, 0, 180)]
+    results_list = []
+
+    for i, bbox in enumerate(persons_to_process):
+        pad = 10
+        px1, py1 = max(0, bbox[0] - pad), max(0, bbox[1] - pad)
+        px2, py2 = min(w, bbox[2] + pad), min(h, bbox[3] + pad)
+
+        try:
+            sam_results = sam_model(frame, bboxes=[[px1, py1, px2, py2]], device=device, verbose=False)
+        except Exception:
+            continue
+
+        if sam_results[0].masks is None or len(sam_results[0].masks.xy) == 0:
+            continue
+
+        polygon = sam_results[0].masks.xy[0]
+        highest_y = int(np.min(polygon[:, 1]))
+        lowest_y = int(np.max(polygon[:, 1]))
+        center_x = int(np.mean(polygon[:, 0]))
+
+        pixel_height = lowest_y - highest_y
+        estimated_height = (A4_REAL_LENGTH * pixel_height) / a4paper_pixel_length
+
+        results_list.append({
+            "person_idx": i + 1,
+            "height_cm": round(estimated_height, 1),
+            "pixel_height": pixel_height,
+        })
+
+        color = person_colors[i % len(person_colors)]
+        mask = sam_results[0].masks.data[0].cpu().numpy()
+        mask_resized = cv2.resize(mask.astype(np.uint8), (w, h))
+        overlay = result_frame.copy()
+        overlay[mask_resized > 0] = overlay[mask_resized > 0] * 0.6 + np.array(color) * 0.4
+        result_frame = overlay.astype(np.uint8)
+
+        cv2.circle(result_frame, (center_x, highest_y), 7, (0, 0, 255), -1)
+        cv2.circle(result_frame, (center_x, lowest_y), 7, (0, 0, 255), -1)
+        cv2.line(result_frame, (center_x, highest_y), (center_x, lowest_y), (255, 255, 0), 2)
+        cv2.putText(result_frame, f"P{i+1}: {estimated_height:.1f} cm",
+                    (center_x + 10, (highest_y + lowest_y) // 2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+
+    if results_list:
+        frame_data = encode_frame(result_frame)
+        emit("capture_result", {
+            "success": True,
+            "mode": "a4paper",
+            "image": frame_data,
+            "persons": results_list,
+            "a4paper_pixel_length": a4paper_pixel_length,
         })
     else:
         emit("capture_result", {"success": False, "error": "SAM failed to generate masks for any person"})
