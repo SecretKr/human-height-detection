@@ -13,6 +13,8 @@ document.addEventListener("DOMContentLoaded", () => {
     const btnDismiss = document.getElementById("btnDismiss");
     const btnModeAruco = document.getElementById("btnModeAruco");
     const btnModeCard = document.getElementById("btnModeCard");
+    const btnModeA4 = document.getElementById("btnModeA4");
+    const btnAutoShot = document.getElementById("btnAutoShot");
 
     const statusCamera = document.getElementById("statusCamera");
     const statusPerson = document.getElementById("statusPerson");
@@ -22,6 +24,8 @@ document.addEventListener("DOMContentLoaded", () => {
     const statusArucoRow = document.getElementById("statusArucoRow");
     const statusDistanceRow = document.getElementById("statusDistanceRow");
     const statusCardRow = document.getElementById("statusCardRow");
+    const statusA4 = document.getElementById("statusA4");
+    const statusA4Row = document.getElementById("statusA4Row");
     const warningBar = document.getElementById("warningBar");
     const warningText = document.getElementById("warningText");
 
@@ -36,10 +40,14 @@ document.addEventListener("DOMContentLoaded", () => {
 
     const instructionsAruco = document.getElementById("instructionsAruco");
     const instructionsCardMode = document.getElementById("instructionsCardMode");
+    const instructionsA4Mode = document.getElementById("instructionsA4Mode");
 
     let isStreaming = false;
     let countdownTimer = null;
     let currentMode = "aruco";
+    let autoShot = false;
+    let isCountingDown = false;
+    let lastCanCapture = false;
 
     // --- Mode Switching ---
     function switchMode(mode) {
@@ -47,19 +55,24 @@ document.addEventListener("DOMContentLoaded", () => {
 
         btnModeAruco.classList.toggle("active", mode === "aruco");
         btnModeCard.classList.toggle("active", mode === "card");
+        btnModeA4.classList.toggle("active", mode === "a4paper");
 
         statusArucoRow.style.display = mode === "aruco" ? "" : "none";
         statusDistanceRow.style.display = mode === "aruco" ? "" : "none";
         statusCardRow.style.display = mode === "card" ? "" : "none";
+        statusA4Row.style.display = mode === "a4paper" ? "" : "none";
 
         instructionsAruco.style.display = mode === "aruco" ? "" : "none";
         instructionsCardMode.style.display = mode === "card" ? "" : "none";
+        instructionsA4Mode.style.display = mode === "a4paper" ? "" : "none";
 
         if (mode === "aruco") {
             statusAruco.innerHTML = '<span class="dot dot-gray"></span> --';
             statusDistance.textContent = "--";
-        } else {
+        } else if (mode === "card") {
             statusCard.innerHTML = '<span class="dot dot-gray"></span> --';
+        } else {
+            statusA4.innerHTML = '<span class="dot dot-gray"></span> --';
         }
 
         btnCapture.disabled = true;
@@ -73,6 +86,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     btnModeAruco.addEventListener("click", () => switchMode("aruco"));
     btnModeCard.addEventListener("click", () => switchMode("card"));
+    btnModeA4.addEventListener("click", () => switchMode("a4paper"));
 
     // --- Button Handlers ---
     btnStart.addEventListener("click", () => {
@@ -91,12 +105,25 @@ document.addEventListener("DOMContentLoaded", () => {
         startCountdown();
     });
 
+    btnAutoShot.addEventListener("click", () => {
+        autoShot = !autoShot;
+        btnAutoShot.textContent = autoShot ? "On" : "Off";
+        btnAutoShot.classList.toggle("on", autoShot);
+        btnAutoShot.setAttribute("aria-pressed", autoShot);
+        // If turning off while a countdown is running, reset it
+        if (!autoShot && isCountingDown) {
+            resetCountdown();
+        }
+    });
+
     btnDismiss.addEventListener("click", () => {
         resultCard.style.display = "none";
     });
 
     // --- Countdown ---
     function startCountdown() {
+        if (isCountingDown) return;
+        isCountingDown = true;
         btnCapture.disabled = true;
         let count = 5;
         countdownNumber.textContent = count;
@@ -108,10 +135,23 @@ document.addEventListener("DOMContentLoaded", () => {
                 countdownNumber.textContent = count;
             } else {
                 clearInterval(countdownTimer);
+                countdownTimer = null;
+                isCountingDown = false;
                 countdownOverlay.style.display = "none";
                 socket.emit("capture");
             }
         }, 1000);
+    }
+
+    function resetCountdown() {
+        if (!isCountingDown) return;
+        clearInterval(countdownTimer);
+        countdownTimer = null;
+        isCountingDown = false;
+        countdownOverlay.style.display = "none";
+        countdownNumber.textContent = "5";
+        // Re-enable capture button only if still ready
+        btnCapture.disabled = !lastCanCapture;
     }
 
     // --- Socket Events ---
@@ -157,6 +197,12 @@ document.addEventListener("DOMContentLoaded", () => {
             } else {
                 statusCard.innerHTML = '<span class="dot dot-gray"></span> Not found';
             }
+        } else if (status.mode === "a4paper") {
+            if (status.a4paper_detected) {
+                statusA4.innerHTML = '<span class="dot dot-green"></span> Detected';
+            } else {
+                statusA4.innerHTML = '<span class="dot dot-gray"></span> Not found';
+            }
         }
 
         // Warning
@@ -171,11 +217,25 @@ document.addEventListener("DOMContentLoaded", () => {
         let canCapture = status.person_detected && !status.is_cut_off;
         if (status.mode === "aruco") canCapture = canCapture && status.aruco_detected;
         if (status.mode === "card") canCapture = canCapture && status.card_detected;
-        btnCapture.disabled = !canCapture;
+        if (status.mode === "a4paper") canCapture = canCapture && status.a4paper_detected;
+        btnCapture.disabled = !canCapture || isCountingDown;
+
+        // Auto-shot logic
+        if (autoShot && isStreaming) {
+            if (canCapture && !lastCanCapture && !isCountingDown) {
+                // Just became ready — start countdown
+                startCountdown();
+            } else if (!canCapture && isCountingDown) {
+                // Lost tracking mid-countdown — reset
+                resetCountdown();
+            }
+        }
+        lastCanCapture = canCapture;
     });
 
     socket.on("capture_result", (data) => {
-        btnCapture.disabled = false;
+        isCountingDown = false;
+        btnCapture.disabled = !lastCanCapture;
 
         if (!data.success) {
             alert("Capture failed: " + data.error);
@@ -184,7 +244,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
         resultImage.src = "data:image/jpeg;base64," + data.image;
 
-        if (data.mode === "card") {
+        if (data.mode === "card" || data.mode === "a4paper") {
             resultSingle.style.display = "none";
             resultMulti.style.display = "block";
             resultPersonsList.innerHTML = "";
@@ -228,6 +288,11 @@ document.addEventListener("DOMContentLoaded", () => {
 
     function stopUI() {
         isStreaming = false;
+        isCountingDown = false;
+        lastCanCapture = false;
+        if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+        countdownOverlay.style.display = "none";
+        countdownNumber.textContent = "5";
         videoFeed.style.display = "none";
         videoPlaceholder.style.display = "flex";
         videoPlaceholder.querySelector("p").textContent = 'Click "Start Camera" to begin';
@@ -243,6 +308,7 @@ document.addEventListener("DOMContentLoaded", () => {
         statusAruco.innerHTML = '<span class="dot dot-gray"></span> --';
         statusDistance.textContent = "--";
         statusCard.innerHTML = '<span class="dot dot-gray"></span> --';
+        statusA4.innerHTML = '<span class="dot dot-gray"></span> --';
         warningBar.style.display = "none";
     }
 });
