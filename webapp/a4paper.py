@@ -8,6 +8,18 @@ import numpy as np
 A4_WIDTH_CM = 21.0
 A4_HEIGHT_CM = 29.7
 A4_ASPECT = A4_HEIGHT_CM / A4_WIDTH_CM
+HLS_H_MIN = 0
+HLS_H_MAX = 179
+HLS_L_MIN = 120
+HLS_L_MAX = 255
+HLS_S_MIN = 0
+HLS_S_MAX = 80
+BLUR_KSIZE = 7
+CANNY_LOW = 50
+CANNY_HIGH = 150
+MORPH_KSIZE = 5
+CLOSE_ITER = 2
+OPEN_ITER = 1
 
 
 @dataclass
@@ -38,26 +50,20 @@ def _order_points(pts: np.ndarray) -> np.ndarray:
     return rect
 
 
-def _preprocess_a4_mask(bgr: np.ndarray) -> np.ndarray:
-    blurred = cv2.GaussianBlur(bgr, (7, 7), 0)
-    lab = cv2.cvtColor(blurred, cv2.COLOR_BGR2LAB)
-    l_channel = lab[:, :, 0]
+def _preprocess_a4_edges(bgr: np.ndarray) -> np.ndarray:
+    blurred = cv2.GaussianBlur(bgr, (BLUR_KSIZE, BLUR_KSIZE), 0)
+    hls = cv2.cvtColor(blurred, cv2.COLOR_BGR2HLS)
+    lower = np.array([HLS_H_MIN, HLS_L_MIN, HLS_S_MIN], dtype=np.uint8)
+    upper = np.array([HLS_H_MAX, HLS_L_MAX, HLS_S_MAX], dtype=np.uint8)
+    hls_mask = cv2.inRange(hls, lower, upper)
 
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-    enhanced = clahe.apply(l_channel)
+    gray = cv2.cvtColor(blurred, cv2.COLOR_BGR2GRAY)
+    masked_gray = cv2.bitwise_and(gray, gray, mask=hls_mask)
+    edges = cv2.Canny(masked_gray, CANNY_LOW, CANNY_HIGH)
 
-    thresh = cv2.adaptiveThreshold(
-        enhanced,
-        255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY,
-        21,
-        10,
-    )
-
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-    closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=2)
-    opened = cv2.morphologyEx(closed, cv2.MORPH_OPEN, kernel, iterations=1)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (MORPH_KSIZE, MORPH_KSIZE))
+    closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=CLOSE_ITER)
+    opened = cv2.morphologyEx(closed, cv2.MORPH_OPEN, kernel, iterations=OPEN_ITER)
     return opened
 
 
@@ -87,13 +93,14 @@ def detect_a4_paper(
         offset_x = x1
         offset_y = y1
 
-    mask = _preprocess_a4_mask(bgr)
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    edges = _preprocess_a4_edges(bgr)
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     h, w = bgr.shape[:2]
     min_area = min_area_ratio * (h * w)
     best = None
-    best_score = 0.0
+    best_ratio_diff = None
+    best_area = 0.0
 
     for cnt in contours:
         area = cv2.contourArea(cnt)
@@ -116,16 +123,18 @@ def detect_a4_paper(
         long_px = max(width_px, height_px)
         short_px = min(width_px, height_px)
         ratio = long_px / short_px
-        ratio_score = 1.0 - abs(ratio - A4_ASPECT) / A4_ASPECT
-        if ratio_score < max(0.0, 1.0 - aspect_tolerance):
+        ratio_diff = abs(ratio - A4_ASPECT)
+        if ratio_diff > A4_ASPECT * aspect_tolerance:
             continue
 
-        area_score = area / float(h * w)
-        score = ratio_score * area_score
-        if score <= best_score:
-            continue
+        if best is not None:
+            if ratio_diff > best_ratio_diff:
+                continue
+            if ratio_diff == best_ratio_diff and area <= best_area:
+                continue
 
-        best_score = score
+        best_ratio_diff = ratio_diff
+        best_area = area
         best = {
             "rect": rect,
             "width_px": width_px,

@@ -6,9 +6,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
     const debugImage = document.getElementById("debugImage");
     const debugBlur = document.getElementById("debugBlur");
-    const debugL = document.getElementById("debugL");
-    const debugClahe = document.getElementById("debugClahe");
-    const debugThresh = document.getElementById("debugThresh");
+    const debugHls = document.getElementById("debugHls");
+    const debugEdges = document.getElementById("debugEdges");
     const debugClosed = document.getElementById("debugClosed");
     const debugOpened = document.getElementById("debugOpened");
     const debugContours = document.getElementById("debugContours");
@@ -20,10 +19,14 @@ document.addEventListener("DOMContentLoaded", () => {
 
     const controls = {
         blurKsize: document.getElementById("blurKsize"),
-        claheClip: document.getElementById("claheClip"),
-        claheGrid: document.getElementById("claheGrid"),
-        adaptBlock: document.getElementById("adaptBlock"),
-        adaptC: document.getElementById("adaptC"),
+        hLow: document.getElementById("hLow"),
+        hHigh: document.getElementById("hHigh"),
+        lLow: document.getElementById("lLow"),
+        lHigh: document.getElementById("lHigh"),
+        sLow: document.getElementById("sLow"),
+        sHigh: document.getElementById("sHigh"),
+        cannyLow: document.getElementById("cannyLow"),
+        cannyHigh: document.getElementById("cannyHigh"),
         morphKsize: document.getElementById("morphKsize"),
         closeIter: document.getElementById("closeIter"),
         openIter: document.getElementById("openIter"),
@@ -33,10 +36,14 @@ document.addEventListener("DOMContentLoaded", () => {
 
     const outputs = {
         blurKsize: document.getElementById("blurKsizeValue"),
-        claheClip: document.getElementById("claheClipValue"),
-        claheGrid: document.getElementById("claheGridValue"),
-        adaptBlock: document.getElementById("adaptBlockValue"),
-        adaptC: document.getElementById("adaptCValue"),
+        hLow: document.getElementById("hLowValue"),
+        hHigh: document.getElementById("hHighValue"),
+        lLow: document.getElementById("lLowValue"),
+        lHigh: document.getElementById("lHighValue"),
+        sLow: document.getElementById("sLowValue"),
+        sHigh: document.getElementById("sHighValue"),
+        cannyLow: document.getElementById("cannyLowValue"),
+        cannyHigh: document.getElementById("cannyHighValue"),
         morphKsize: document.getElementById("morphKsizeValue"),
         closeIter: document.getElementById("closeIterValue"),
         openIter: document.getElementById("openIterValue"),
@@ -61,20 +68,20 @@ document.addEventListener("DOMContentLoaded", () => {
             outputs[id].textContent = formatFloat(value, 2);
             return;
         }
-        if (id === "claheClip") {
-            outputs[id].textContent = formatFloat(value, 1);
-            return;
-        }
         outputs[id].textContent = value;
     }
 
     function getParams() {
         return {
             blur_ksize: parseInt(controls.blurKsize.value, 10),
-            clahe_clip: parseFloat(controls.claheClip.value),
-            clahe_grid: parseInt(controls.claheGrid.value, 10),
-            adapt_block: parseInt(controls.adaptBlock.value, 10),
-            adapt_c: parseInt(controls.adaptC.value, 10),
+            h_low: parseInt(controls.hLow.value, 10),
+            h_high: parseInt(controls.hHigh.value, 10),
+            l_low: parseInt(controls.lLow.value, 10),
+            l_high: parseInt(controls.lHigh.value, 10),
+            s_low: parseInt(controls.sLow.value, 10),
+            s_high: parseInt(controls.sHigh.value, 10),
+            canny_low: parseInt(controls.cannyLow.value, 10),
+            canny_high: parseInt(controls.cannyHigh.value, 10),
             morph_ksize: parseInt(controls.morphKsize.value, 10),
             close_iter: parseInt(controls.closeIter.value, 10),
             open_iter: parseInt(controls.openIter.value, 10),
@@ -124,9 +131,8 @@ document.addEventListener("DOMContentLoaded", () => {
     socket.on("a4_debug_frame", (data) => {
         if (data.overlay) debugImage.src = "data:image/jpeg;base64," + data.overlay;
         if (data.blur) debugBlur.src = "data:image/jpeg;base64," + data.blur;
-        if (data.l_channel) debugL.src = "data:image/jpeg;base64," + data.l_channel;
-        if (data.clahe) debugClahe.src = "data:image/jpeg;base64," + data.clahe;
-        if (data.thresh) debugThresh.src = "data:image/jpeg;base64," + data.thresh;
+        if (data.hls) debugHls.src = "data:image/jpeg;base64," + data.hls;
+        if (data.edges) debugEdges.src = "data:image/jpeg;base64," + data.edges;
         if (data.closed) debugClosed.src = "data:image/jpeg;base64," + data.closed;
         if (data.opened) debugOpened.src = "data:image/jpeg;base64," + data.opened;
         if (data.contours) debugContours.src = "data:image/jpeg;base64," + data.contours;

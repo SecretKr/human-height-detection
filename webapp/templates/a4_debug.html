@@ -70,36 +70,68 @@
                             <span id="blurKsizeValue">7</span>
                         </div>
                     </div>
+                </div>
+
+                <div class="card">
+                    <h3>HLS Mask</h3>
                     <div class="form-group">
-                        <label for="claheClip">CLAHE Clip Limit</label>
+                        <label for="hLow">H Min</label>
                         <div class="range-row">
-                            <input type="range" id="claheClip" min="1" max="6" step="0.1" value="3">
-                            <span id="claheClipValue">3.0</span>
+                            <input type="range" id="hLow" min="0" max="179" step="1" value="0">
+                            <span id="hLowValue">0</span>
                         </div>
                     </div>
                     <div class="form-group">
-                        <label for="claheGrid">CLAHE Grid Size</label>
+                        <label for="hHigh">H Max</label>
                         <div class="range-row">
-                            <input type="range" id="claheGrid" min="2" max="16" step="1" value="8">
-                            <span id="claheGridValue">8</span>
+                            <input type="range" id="hHigh" min="0" max="179" step="1" value="179">
+                            <span id="hHighValue">179</span>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="lLow">L Min</label>
+                        <div class="range-row">
+                            <input type="range" id="lLow" min="0" max="255" step="1" value="120">
+                            <span id="lLowValue">120</span>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="lHigh">L Max</label>
+                        <div class="range-row">
+                            <input type="range" id="lHigh" min="0" max="255" step="1" value="255">
+                            <span id="lHighValue">255</span>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="sLow">S Min</label>
+                        <div class="range-row">
+                            <input type="range" id="sLow" min="0" max="255" step="1" value="0">
+                            <span id="sLowValue">0</span>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="sHigh">S Max</label>
+                        <div class="range-row">
+                            <input type="range" id="sHigh" min="0" max="255" step="1" value="80">
+                            <span id="sHighValue">80</span>
                         </div>
                     </div>
                 </div>
 
                 <div class="card">
-                    <h3>Adaptive Threshold</h3>
+                    <h3>Canny</h3>
                     <div class="form-group">
-                        <label for="adaptBlock">Block Size</label>
+                        <label for="cannyLow">Low Threshold</label>
                         <div class="range-row">
-                            <input type="range" id="adaptBlock" min="3" max="51" step="2" value="21">
-                            <span id="adaptBlockValue">21</span>
+                            <input type="range" id="cannyLow" min="0" max="255" step="1" value="50">
+                            <span id="cannyLowValue">50</span>
                         </div>
                     </div>
                     <div class="form-group">
-                        <label for="adaptC">C Offset</label>
+                        <label for="cannyHigh">High Threshold</label>
                         <div class="range-row">
-                            <input type="range" id="adaptC" min="0" max="30" step="1" value="10">
-                            <span id="adaptCValue">10</span>
+                            <input type="range" id="cannyHigh" min="0" max="255" step="1" value="150">
+                            <span id="cannyHighValue">150</span>
                         </div>
                     </div>
                 </div>
@@ -160,16 +192,12 @@
                         <img id="debugBlur" alt="Blurred">
                     </div>
                     <div class="debug-panel">
-                        <h4>L Channel</h4>
-                        <img id="debugL" alt="L channel">
+                        <h4>HLS Mask</h4>
+                        <img id="debugHls" alt="HLS mask">
                     </div>
                     <div class="debug-panel">
-                        <h4>CLAHE</h4>
-                        <img id="debugClahe" alt="CLAHE">
-                    </div>
-                    <div class="debug-panel">
-                        <h4>Adaptive Threshold</h4>
-                        <img id="debugThresh" alt="Threshold">
+                        <h4>Canny Edges</h4>
+                        <img id="debugEdges" alt="Edges">
                     </div>
                     <div class="debug-panel">
                         <h4>Closed</h4>
@@ -187,8 +215,8 @@
                 <div class="debug-help card">
                     <h3>Tips</h3>
                     <ul class="instructions-list tips-list">
-                        <li>Increase CLAHE clip limit to reveal paper in shadowy scenes.</li>
-                        <li>Adjust adaptive block size and C to balance paper vs. background.</li>
+                        <li>Raise L Min to isolate bright paper; lower S Max to ignore colors.</li>
+                        <li>Use a higher Canny high threshold to reduce noise.</li>
                         <li>Use a larger morphology kernel to close broken paper edges.</li>
                         <li>Lower min area ratio when the paper is far away.</li>
                     </ul>

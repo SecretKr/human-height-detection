@@ -56,10 +56,14 @@ selected_person_idx = -1
 
 A4_DEBUG_DEFAULTS = {
     "blur_ksize": 7,
-    "clahe_clip": 3.0,
-    "clahe_grid": 8,
-    "adapt_block": 21,
-    "adapt_c": 10,
+    "h_low": 0,
+    "h_high": 179,
+    "l_low": 120,
+    "l_high": 255,
+    "s_low": 0,
+    "s_high": 80,
+    "canny_low": 50,
+    "canny_high": 150,
     "morph_ksize": 5,
     "close_iter": 2,
     "open_iter": 1,
@@ -130,13 +134,24 @@ def _sanitize_a4_debug_params(data):
     if params["blur_ksize"] % 2 == 0:
         params["blur_ksize"] += 1
 
-    params["clahe_clip"] = _clamp_float(params["clahe_clip"], 1.0, 6.0, 3.0)
-    params["clahe_grid"] = _clamp_int(params["clahe_grid"], 2, 16, 8)
+    params["h_low"] = _clamp_int(params["h_low"], 0, 179, 0)
+    params["h_high"] = _clamp_int(params["h_high"], 0, 179, 179)
+    params["l_low"] = _clamp_int(params["l_low"], 0, 255, 120)
+    params["l_high"] = _clamp_int(params["l_high"], 0, 255, 255)
+    params["s_low"] = _clamp_int(params["s_low"], 0, 255, 0)
+    params["s_high"] = _clamp_int(params["s_high"], 0, 255, 80)
 
-    params["adapt_block"] = _clamp_int(params["adapt_block"], 3, 51, 21)
-    if params["adapt_block"] % 2 == 0:
-        params["adapt_block"] += 1
-    params["adapt_c"] = _clamp_int(params["adapt_c"], 0, 30, 10)
+    if params["h_high"] < params["h_low"]:
+        params["h_low"], params["h_high"] = params["h_high"], params["h_low"]
+    if params["l_high"] < params["l_low"]:
+        params["l_low"], params["l_high"] = params["l_high"], params["l_low"]
+    if params["s_high"] < params["s_low"]:
+        params["s_low"], params["s_high"] = params["s_high"], params["s_low"]
+
+    params["canny_low"] = _clamp_int(params["canny_low"], 0, 255, 50)
+    params["canny_high"] = _clamp_int(params["canny_high"], 0, 255, 150)
+    if params["canny_high"] <= params["canny_low"]:
+        params["canny_high"] = min(255, params["canny_low"] + 1)
 
     params["morph_ksize"] = _clamp_int(params["morph_ksize"], 3, 15, 5)
     if params["morph_ksize"] % 2 == 0:
@@ -169,29 +184,20 @@ def _build_a4_debug_views(frame: np.ndarray, params, roi_bbox=None):
         (params["blur_ksize"], params["blur_ksize"]),
         0,
     )
-    lab = cv2.cvtColor(blurred, cv2.COLOR_BGR2LAB)
-    l_channel = lab[:, :, 0]
+    hls = cv2.cvtColor(blurred, cv2.COLOR_BGR2HLS)
+    lower = np.array([params["h_low"], params["l_low"], params["s_low"]], dtype=np.uint8)
+    upper = np.array([params["h_high"], params["l_high"], params["s_high"]], dtype=np.uint8)
+    hls_mask = cv2.inRange(hls, lower, upper)
 
-    clahe = cv2.createCLAHE(
-        clipLimit=params["clahe_clip"],
-        tileGridSize=(params["clahe_grid"], params["clahe_grid"]),
-    )
-    enhanced = clahe.apply(l_channel)
-
-    thresh = cv2.adaptiveThreshold(
-        enhanced,
-        255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY,
-        params["adapt_block"],
-        params["adapt_c"],
-    )
+    gray = cv2.cvtColor(blurred, cv2.COLOR_BGR2GRAY)
+    masked_gray = cv2.bitwise_and(gray, gray, mask=hls_mask)
+    edges = cv2.Canny(masked_gray, params["canny_low"], params["canny_high"])
 
     kernel = cv2.getStructuringElement(
         cv2.MORPH_RECT,
         (params["morph_ksize"], params["morph_ksize"]),
     )
-    closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=params["close_iter"])
+    closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=params["close_iter"])
     opened = cv2.morphologyEx(closed, cv2.MORPH_OPEN, kernel, iterations=params["open_iter"])
 
     contours, _ = cv2.findContours(opened, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -203,7 +209,8 @@ def _build_a4_debug_views(frame: np.ndarray, params, roi_bbox=None):
 
     overlay = roi.copy()
     best = None
-    best_score = 0.0
+    best_ratio_diff = None
+    best_area = 0.0
     for cnt in contours:
         area = cv2.contourArea(cnt)
         if area < min_area:
@@ -223,16 +230,18 @@ def _build_a4_debug_views(frame: np.ndarray, params, roi_bbox=None):
         long_px = max(width_px, height_px)
         short_px = min(width_px, height_px)
         ratio = long_px / short_px
-        ratio_score = 1.0 - abs(ratio - A4_ASPECT) / A4_ASPECT
-        if ratio_score < max(0.0, 1.0 - params["aspect_tolerance"]):
+        ratio_diff = abs(ratio - A4_ASPECT)
+        if ratio_diff > A4_ASPECT * params["aspect_tolerance"]:
             continue
 
-        area_score = area / float(h * w)
-        score = ratio_score * area_score
-        if score <= best_score:
-            continue
+        if best is not None:
+            if ratio_diff > best_ratio_diff:
+                continue
+            if ratio_diff == best_ratio_diff and area <= best_area:
+                continue
 
-        best_score = score
+        best_ratio_diff = ratio_diff
+        best_area = area
         best = {
             "rect": rect,
             "width_px": width_px,
@@ -263,9 +272,10 @@ def _build_a4_debug_views(frame: np.ndarray, params, roi_bbox=None):
             "cm_per_px": round(cm_per_px, 5),
         }
 
-    l_view = cv2.cvtColor(l_channel, cv2.COLOR_GRAY2BGR)
-    clahe_view = cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
-    thresh_view = cv2.cvtColor(thresh, cv2.COLOR_GRAY2BGR)
+    hls_view = cv2.cvtColor(hls_mask, cv2.COLOR_GRAY2BGR)
+    edges_view = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
+    closed_view = cv2.cvtColor(closed, cv2.COLOR_GRAY2BGR)
+    opened_view = cv2.cvtColor(opened, cv2.COLOR_GRAY2BGR)
     closed_view = cv2.cvtColor(closed, cv2.COLOR_GRAY2BGR)
     opened_view = cv2.cvtColor(opened, cv2.COLOR_GRAY2BGR)
 
@@ -279,9 +289,8 @@ def _build_a4_debug_views(frame: np.ndarray, params, roi_bbox=None):
         overlay = _paste(overlay)
         contours_view = _paste(contours_view)
         blurred = _paste(blurred)
-        l_view = _paste(l_view)
-        clahe_view = _paste(clahe_view)
-        thresh_view = _paste(thresh_view)
+        hls_view = _paste(hls_view)
+        edges_view = _paste(edges_view)
         closed_view = _paste(closed_view)
         opened_view = _paste(opened_view)
 
@@ -296,9 +305,8 @@ def _build_a4_debug_views(frame: np.ndarray, params, roi_bbox=None):
     return {
         "overlay": overlay,
         "blur": blurred,
-        "l_channel": l_view,
-        "clahe": clahe_view,
-        "thresh": thresh_view,
+        "hls": hls_view,
+        "edges": edges_view,
         "closed": closed_view,
         "opened": opened_view,
         "contours": contours_view,
@@ -619,9 +627,8 @@ def a4_debug_loop():
             {
                 "overlay": encode_frame(debug_views["overlay"]),
                 "blur": encode_frame(debug_views["blur"]),
-                "l_channel": encode_frame(debug_views["l_channel"]),
-                "clahe": encode_frame(debug_views["clahe"]),
-                "thresh": encode_frame(debug_views["thresh"]),
+                "hls": encode_frame(debug_views["hls"]),
+                "edges": encode_frame(debug_views["edges"]),
                 "closed": encode_frame(debug_views["closed"]),
                 "opened": encode_frame(debug_views["opened"]),
                 "contours": encode_frame(debug_views["contours"]),
