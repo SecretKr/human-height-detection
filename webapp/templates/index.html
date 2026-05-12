@@ -11,7 +11,7 @@
         <!-- Header -->
         <header class="header">
             <h1>Human Height Detection</h1>
-            <p class="subtitle">YOLO &bull; SAM &bull; ArUco &bull; ID Card</p>
+            <p class="subtitle">YOLO &bull; SAM &bull; ArUco &bull; ID Card &bull; A4 Paper</p>
             <nav class="nav-tabs">
                 <a href="/" class="nav-tab active">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg>
@@ -65,6 +65,15 @@
                     </button>
                 </div>
 
+                <!-- Auto Shot Toggle -->
+                <div class="autoshot-bar">
+                    <label class="autoshot-label" for="btnAutoShot">
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/></svg>
+                        Auto Shot
+                    </label>
+                    <button id="btnAutoShot" class="btn-autoshot" aria-pressed="false">Off</button>
+                </div>
+
                 <!-- Detection Mode Selector -->
                 <div class="mode-selector">
                     <span class="mode-label">Detection Method:</span>
@@ -76,6 +85,10 @@
                         <button class="btn-mode" data-mode="card" id="btnModeCard">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="5" width="20" height="14" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/></svg>
                             ID Card
+                        </button>
+                        <button class="btn-mode" data-mode="a4paper" id="btnModeA4">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="2" width="16" height="20" rx="1"/><line x1="8" y1="7" x2="16" y2="7"/><line x1="8" y1="11" x2="16" y2="11"/><line x1="8" y1="15" x2="12" y2="15"/></svg>
+                            A4 Paper
                         </button>
                     </div>
                 </div>
@@ -112,6 +125,12 @@
                         <div class="status-item" id="statusCardRow" style="display:none;">
                             <span class="status-label">ID Card</span>
                             <span class="status-value" id="statusCard">
+                                <span class="dot dot-gray"></span> --
+                            </span>
+                        </div>
+                        <div class="status-item" id="statusA4Row" style="display:none;">
+                            <span class="status-label">A4 Paper</span>
+                            <span class="status-value" id="statusA4">
                                 <span class="dot dot-gray"></span> --
                             </span>
                         </div>
@@ -169,6 +188,15 @@
                             <li>Hold a <strong>standard ID card</strong> (8.56 &times; 5.4 cm) visible in the scene</li>
                             <li>Click <strong>Start Camera</strong> to begin the live feed</li>
                             <li>Wait for person(s) &amp; card to be detected (cyan outline on card)</li>
+                            <li>Ensure all persons are fully visible (head to feet)</li>
+                            <li>Click <strong>Measure Height</strong> to measure all detected persons at once</li>
+                        </ol>
+                    </div>
+                    <div id="instructionsA4Mode" style="display:none;">
+                        <ol class="instructions-list">
+                            <li>Place an <strong>A4 sheet of paper</strong> (21 &times; 29.7 cm) visible in the scene</li>
+                            <li>Click <strong>Start Camera</strong> to begin the live feed</li>
+                            <li>Wait for person(s) &amp; paper to be detected (orange outline on paper)</li>
                             <li>Ensure all persons are fully visible (head to feet)</li>
                             <li>Click <strong>Measure Height</strong> to measure all detected persons at once</li>
                         </ol>

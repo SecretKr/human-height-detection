@@ -525,6 +525,51 @@ select.input {
     flex-wrap: wrap;
 }
 
+/* === Auto Shot Bar === */
+.autoshot-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 16px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+}
+
+.autoshot-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    cursor: default;
+}
+
+.btn-autoshot {
+    padding: 5px 18px;
+    border-radius: 20px;
+    border: 1px solid var(--border);
+    background: var(--surface-2);
+    color: var(--text-dim);
+    font-size: 0.8rem;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+}
+
+.btn-autoshot.on {
+    background: var(--green);
+    border-color: var(--green);
+    color: #0f1117;
+    box-shadow: 0 2px 10px rgba(0, 184, 148, 0.4);
+}
+
+
 .mode-label {
     font-size: 0.8rem;
     color: var(--text-dim);
