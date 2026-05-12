@@ -1,5 +1,6 @@
 import base64
 import math
+import os
 
 import cv2
 import cv2.aruco as aruco
@@ -9,14 +10,9 @@ from flask import Flask, render_template, Response, jsonify, request
 from flask_socketio import SocketIO, emit
 from ultralytics import YOLO, SAM
 
-from a4paper import (
-    A4_ASPECT,
-    A4_HEIGHT_CM,
-    A4_WIDTH_CM,
-    detect_a4_paper,
-    draw_a4_overlay,
-    estimate_human_height,
-)
+A4_WIDTH_CM = 21.0
+A4_HEIGHT_CM = 29.7
+A4_ASPECT = A4_HEIGHT_CM / A4_WIDTH_CM
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = "height-detection-secret"
@@ -25,13 +21,11 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 # --- Global State ---
 yolo_model = None
 sam_model = None
+a4_seg_model = None
 device = None
 cap = None
 streaming = False
 detection_mode = "aruco"
-debug_cap = None
-debug_streaming = False
-debug_last_person_bbox = None
 
 # ArUco setup
 MARKER_SIZE = 6  # cm
@@ -53,25 +47,9 @@ marker_corners = None
 last_a4_detection = None
 all_persons = []
 selected_person_idx = -1
-
-A4_DEBUG_DEFAULTS = {
-    "blur_ksize": 7,
-    "h_low": 0,
-    "h_high": 179,
-    "l_low": 120,
-    "l_high": 255,
-    "s_low": 0,
-    "s_high": 80,
-    "canny_low": 50,
-    "canny_high": 150,
-    "morph_ksize": 5,
-    "close_iter": 2,
-    "open_iter": 1,
-    "min_area_ratio": 0.02,
-    "aspect_tolerance": 0.2,
-}
-
-a4_debug_params = A4_DEBUG_DEFAULTS.copy()
+a4_seg_class = None
+a4_seg_conf = 0.25
+a4_seg_model_path = None
 
 
 def get_device():
@@ -86,13 +64,54 @@ def get_device():
 
 
 def load_models():
-    global yolo_model, sam_model, device
+    global yolo_model, sam_model, a4_seg_model, device, a4_seg_class, a4_seg_conf, a4_seg_model_path
     device = get_device()
     print(f"Using device: {device}")
     print("Loading YOLO and SAM models...")
     yolo_model = YOLO("yolo26n.pt")
     sam_model = SAM("sam_b.pt")
+    a4_seg_model_path = _resolve_a4_seg_model_path()
+    a4_seg_class = _resolve_a4_seg_class()
+    a4_seg_conf = _resolve_a4_seg_conf()
+    if a4_seg_model_path:
+        try:
+            print(f"Loading A4 segmentation model: {a4_seg_model_path}")
+            a4_seg_model = YOLO(a4_seg_model_path)
+        except Exception as exc:
+            print(f"Failed to load A4 segmentation model: {exc}")
+            a4_seg_model = None
     print("Models loaded successfully.")
+
+
+def _resolve_a4_seg_model_path():
+    env_path = os.getenv("A4_SEG_MODEL")
+    if env_path:
+        return env_path
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    model_path = os.path.join(repo_root, "model", "a4paper.pt")
+    if os.path.exists(model_path):
+        return model_path
+    return None
+
+
+def _resolve_a4_seg_class():
+    value = os.getenv("A4_SEG_CLASS")
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def _resolve_a4_seg_conf():
+    value = os.getenv("A4_SEG_CONF")
+    if value is None or value == "":
+        return 0.25
+    try:
+        return float(value)
+    except ValueError:
+        return 0.25
 
 
 def encode_frame(frame):
@@ -111,207 +130,290 @@ def _order_points(pts: np.ndarray) -> np.ndarray:
     return rect
 
 
-def _sanitize_a4_debug_params(data):
-    params = A4_DEBUG_DEFAULTS.copy()
-    if isinstance(data, dict):
-        params.update(data)
+def _a4_detection_from_mask(mask: np.ndarray):
+    if mask is None:
+        return None
+    mask_u8 = (mask > 0).astype(np.uint8) * 255
+    contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+    largest = max(contours, key=cv2.contourArea)
+    if cv2.contourArea(largest) < 10:
+        return None
 
-    def _clamp_int(value, low, high, default):
-        try:
-            value = int(value)
-        except (TypeError, ValueError):
-            return default
-        return max(low, min(high, value))
+    rect = cv2.minAreaRect(largest)
+    box = cv2.boxPoints(rect)
+    box = _order_points(box.astype("float32"))
 
-    def _clamp_float(value, low, high, default):
-        try:
-            value = float(value)
-        except (TypeError, ValueError):
-            return default
-        return max(low, min(high, value))
+    width_px = float(np.linalg.norm(box[1] - box[0]))
+    height_px = float(np.linalg.norm(box[2] - box[1]))
+    if width_px <= 1.0 or height_px <= 1.0:
+        return None
 
-    params["blur_ksize"] = _clamp_int(params["blur_ksize"], 1, 31, 7)
-    if params["blur_ksize"] % 2 == 0:
-        params["blur_ksize"] += 1
+    long_px = max(width_px, height_px)
+    short_px = min(width_px, height_px)
+    orientation = "portrait" if height_px >= width_px else "landscape"
+    cm_per_px_long = A4_HEIGHT_CM / long_px
+    cm_per_px_short = A4_WIDTH_CM / short_px
+    cm_per_px = (cm_per_px_long + cm_per_px_short) * 0.5
 
-    params["h_low"] = _clamp_int(params["h_low"], 0, 179, 0)
-    params["h_high"] = _clamp_int(params["h_high"], 0, 179, 179)
-    params["l_low"] = _clamp_int(params["l_low"], 0, 255, 120)
-    params["l_high"] = _clamp_int(params["l_high"], 0, 255, 255)
-    params["s_low"] = _clamp_int(params["s_low"], 0, 255, 0)
-    params["s_high"] = _clamp_int(params["s_high"], 0, 255, 80)
-
-    if params["h_high"] < params["h_low"]:
-        params["h_low"], params["h_high"] = params["h_high"], params["h_low"]
-    if params["l_high"] < params["l_low"]:
-        params["l_low"], params["l_high"] = params["l_high"], params["l_low"]
-    if params["s_high"] < params["s_low"]:
-        params["s_low"], params["s_high"] = params["s_high"], params["s_low"]
-
-    params["canny_low"] = _clamp_int(params["canny_low"], 0, 255, 50)
-    params["canny_high"] = _clamp_int(params["canny_high"], 0, 255, 150)
-    if params["canny_high"] <= params["canny_low"]:
-        params["canny_high"] = min(255, params["canny_low"] + 1)
-
-    params["morph_ksize"] = _clamp_int(params["morph_ksize"], 3, 15, 5)
-    if params["morph_ksize"] % 2 == 0:
-        params["morph_ksize"] += 1
-    params["close_iter"] = _clamp_int(params["close_iter"], 0, 5, 2)
-    params["open_iter"] = _clamp_int(params["open_iter"], 0, 5, 1)
-    params["min_area_ratio"] = _clamp_float(params["min_area_ratio"], 0.001, 0.2, 0.02)
-    params["aspect_tolerance"] = _clamp_float(params["aspect_tolerance"], 0.05, 0.5, 0.2)
-
-    return params
+    return {
+        "corners": box,
+        "width_px": width_px,
+        "height_px": height_px,
+        "orientation": orientation,
+        "cm_per_px": cm_per_px,
+        "px_per_cm": 1.0 / cm_per_px,
+    }
 
 
-def _build_a4_debug_views(frame: np.ndarray, params, roi_bbox=None):
-    roi = frame
+def _a4_detection_from_bbox(bbox):
+    x1, y1, x2, y2 = bbox
+    width_px = float(max(0, x2 - x1))
+    height_px = float(max(0, y2 - y1))
+    if width_px <= 1.0 or height_px <= 1.0:
+        return None
+
+    corners = np.array(
+        [[x1, y1], [x2, y1], [x2, y2], [x1, y2]],
+        dtype="float32",
+    )
+
+    long_px = max(width_px, height_px)
+    short_px = min(width_px, height_px)
+    orientation = "portrait" if height_px >= width_px else "landscape"
+    cm_per_px_long = A4_HEIGHT_CM / long_px
+    cm_per_px_short = A4_WIDTH_CM / short_px
+    cm_per_px = (cm_per_px_long + cm_per_px_short) * 0.5
+
+    return {
+        "corners": corners,
+        "width_px": width_px,
+        "height_px": height_px,
+        "orientation": orientation,
+        "cm_per_px": cm_per_px,
+        "px_per_cm": 1.0 / cm_per_px,
+    }
+
+
+def _detect_a4_paper_yolo(
+    model,
+    image: np.ndarray,
+    input_color: str = "rgb",
+    roi_bbox=None,
+    class_id=None,
+    conf: float = 0.25,
+    aspect_tolerance: float = 0.2,
+    device_override: str | None = None,
+    imgsz: int = 640,
+):
+    if model is None:
+        return None
+
+    if input_color.lower() == "bgr":
+        bgr = image
+    else:
+        bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+
     offset_x = 0
     offset_y = 0
     if roi_bbox is not None:
         x1, y1, x2, y2 = roi_bbox
-        x1 = max(0, min(int(x1), frame.shape[1] - 1))
-        y1 = max(0, min(int(y1), frame.shape[0] - 1))
-        x2 = max(0, min(int(x2), frame.shape[1]))
-        y2 = max(0, min(int(y2), frame.shape[0]))
-        if x2 - x1 > 1 and y2 - y1 > 1:
-            roi = frame[y1:y2, x1:x2]
-            offset_x = x1
-            offset_y = y1
+        x1 = max(0, min(int(x1), bgr.shape[1] - 1))
+        y1 = max(0, min(int(y1), bgr.shape[0] - 1))
+        x2 = max(0, min(int(x2), bgr.shape[1]))
+        y2 = max(0, min(int(y2), bgr.shape[0]))
+        if x2 - x1 <= 1 or y2 - y1 <= 1:
+            return None
+        bgr = bgr[y1:y2, x1:x2]
+        offset_x = x1
+        offset_y = y1
 
-    blurred = cv2.GaussianBlur(
-        roi,
-        (params["blur_ksize"], params["blur_ksize"]),
-        0,
-    )
-    hls = cv2.cvtColor(blurred, cv2.COLOR_BGR2HLS)
-    lower = np.array([params["h_low"], params["l_low"], params["s_low"]], dtype=np.uint8)
-    upper = np.array([params["h_high"], params["l_high"], params["s_high"]], dtype=np.uint8)
-    hls_mask = cv2.inRange(hls, lower, upper)
+    try:
+        results = model.predict(
+            source=bgr,
+            imgsz=imgsz,
+            device=device_override,
+            conf=conf,
+            verbose=False,
+        )
+    except Exception:
+        return None
 
-    gray = cv2.cvtColor(blurred, cv2.COLOR_BGR2GRAY)
-    masked_gray = cv2.bitwise_and(gray, gray, mask=hls_mask)
-    edges = cv2.Canny(masked_gray, params["canny_low"], params["canny_high"])
+    if not results:
+        return None
 
-    kernel = cv2.getStructuringElement(
-        cv2.MORPH_RECT,
-        (params["morph_ksize"], params["morph_ksize"]),
-    )
-    closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=params["close_iter"])
-    opened = cv2.morphologyEx(closed, cv2.MORPH_OPEN, kernel, iterations=params["open_iter"])
+    result = results[0]
+    if result.masks is None and result.boxes is None and getattr(result, "obb", None) is None:
+        return None
 
-    contours, _ = cv2.findContours(opened, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    h, w = roi.shape[:2]
-    min_area = params["min_area_ratio"] * (h * w)
+    masks = result.masks.data if result.masks is not None else None
 
-    contours_view = roi.copy()
-    cv2.drawContours(contours_view, contours, -1, (0, 255, 255), 1)
-
-    overlay = roi.copy()
     best = None
     best_ratio_diff = None
     best_area = 0.0
-    for cnt in contours:
-        area = cv2.contourArea(cnt)
-        if area < min_area:
-            continue
-        peri = cv2.arcLength(cnt, True)
-        approx = cv2.approxPolyDP(cnt, 0.02 * peri, True)
-        if len(approx) != 4 or not cv2.isContourConvex(approx):
-            continue
 
-        pts = approx.reshape(4, 2).astype("float32")
-        rect = _order_points(pts)
-        width_px = float(np.linalg.norm(rect[1] - rect[0]))
-        height_px = float(np.linalg.norm(rect[2] - rect[1]))
-        if width_px <= 1.0 or height_px <= 1.0:
-            continue
+    if masks is not None and len(masks) > 0:
+        for i, mask_tensor in enumerate(masks):
+            if class_id is not None and result.boxes is not None:
+                try:
+                    if int(result.boxes.cls[i].item()) != int(class_id):
+                        continue
+                except Exception:
+                    continue
 
-        long_px = max(width_px, height_px)
-        short_px = min(width_px, height_px)
-        ratio = long_px / short_px
-        ratio_diff = abs(ratio - A4_ASPECT)
-        if ratio_diff > A4_ASPECT * params["aspect_tolerance"]:
-            continue
+            mask = mask_tensor.detach().cpu().numpy()
+            if mask.shape[0] != bgr.shape[0] or mask.shape[1] != bgr.shape[1]:
+                mask = cv2.resize(mask, (bgr.shape[1], bgr.shape[0]), interpolation=cv2.INTER_NEAREST)
 
-        if best is not None:
-            if ratio_diff > best_ratio_diff:
-                continue
-            if ratio_diff == best_ratio_diff and area <= best_area:
+            detection = _a4_detection_from_mask(mask)
+            if detection is None:
                 continue
 
-        best_ratio_diff = ratio_diff
-        best_area = area
-        best = {
-            "rect": rect,
-            "width_px": width_px,
-            "height_px": height_px,
-            "ratio": ratio,
-            "area": area,
-        }
+            long_px = max(detection["width_px"], detection["height_px"])
+            short_px = min(detection["width_px"], detection["height_px"])
+            ratio = long_px / max(short_px, 1e-6)
+            ratio_diff = abs(ratio - A4_ASPECT)
+            if ratio_diff > A4_ASPECT * aspect_tolerance:
+                continue
 
-    status = {
-        "detected": False,
-    }
+            area = float(np.count_nonzero(mask))
+            if best is not None:
+                if ratio_diff > best_ratio_diff:
+                    continue
+                if ratio_diff == best_ratio_diff and area <= best_area:
+                    continue
 
-    if best is not None:
-        corners = best["rect"].astype(int)
-        cv2.polylines(overlay, [corners], True, (0, 255, 0), 2)
-        orientation = "portrait" if best["height_px"] >= best["width_px"] else "landscape"
-        long_px = max(best["width_px"], best["height_px"])
-        short_px = min(best["width_px"], best["height_px"])
-        cm_per_px = ((A4_HEIGHT_CM / long_px) + (A4_WIDTH_CM / short_px)) * 0.5
+            best_ratio_diff = ratio_diff
+            best_area = area
+            best = detection
 
-        status = {
-            "detected": True,
-            "width_px": round(best["width_px"], 1),
-            "height_px": round(best["height_px"], 1),
-            "ratio": round(best["ratio"], 3),
-            "area_ratio": round(best["area"] / float(h * w), 4),
-            "orientation": orientation,
-            "cm_per_px": round(cm_per_px, 5),
-        }
+    if best is None and result.boxes is not None and len(result.boxes) > 0:
+        for i, box in enumerate(result.boxes):
+            if class_id is not None:
+                try:
+                    if int(box.cls.item()) != int(class_id):
+                        continue
+                except Exception:
+                    continue
 
-    hls_view = cv2.cvtColor(hls_mask, cv2.COLOR_GRAY2BGR)
-    edges_view = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
-    closed_view = cv2.cvtColor(closed, cv2.COLOR_GRAY2BGR)
-    opened_view = cv2.cvtColor(opened, cv2.COLOR_GRAY2BGR)
-    closed_view = cv2.cvtColor(closed, cv2.COLOR_GRAY2BGR)
-    opened_view = cv2.cvtColor(opened, cv2.COLOR_GRAY2BGR)
+            x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+            detection = _a4_detection_from_bbox((x1, y1, x2, y2))
+            if detection is None:
+                continue
+
+            long_px = max(detection["width_px"], detection["height_px"])
+            short_px = min(detection["width_px"], detection["height_px"])
+            ratio = long_px / max(short_px, 1e-6)
+            ratio_diff = abs(ratio - A4_ASPECT)
+            if ratio_diff > A4_ASPECT * aspect_tolerance:
+                continue
+
+            area = detection["width_px"] * detection["height_px"]
+            if best is not None:
+                if ratio_diff > best_ratio_diff:
+                    continue
+                if ratio_diff == best_ratio_diff and area <= best_area:
+                    continue
+
+            best_ratio_diff = ratio_diff
+            best_area = area
+            best = detection
+
+    if best is None and getattr(result, "obb", None) is not None and len(result.obb) > 0:
+        for i, obb in enumerate(result.obb):
+            if class_id is not None:
+                try:
+                    if int(obb.cls.item()) != int(class_id):
+                        continue
+                except Exception:
+                    continue
+            try:
+                x1, y1, x2, y2 = map(int, obb.xyxy[0].tolist())
+            except Exception:
+                continue
+
+            detection = _a4_detection_from_bbox((x1, y1, x2, y2))
+            if detection is None:
+                continue
+
+            long_px = max(detection["width_px"], detection["height_px"])
+            short_px = min(detection["width_px"], detection["height_px"])
+            ratio = long_px / max(short_px, 1e-6)
+            ratio_diff = abs(ratio - A4_ASPECT)
+            if ratio_diff > A4_ASPECT * aspect_tolerance:
+                continue
+
+            area = detection["width_px"] * detection["height_px"]
+            if best is not None:
+                if ratio_diff > best_ratio_diff:
+                    continue
+                if ratio_diff == best_ratio_diff and area <= best_area:
+                    continue
+
+            best_ratio_diff = ratio_diff
+            best_area = area
+            best = detection
+
+    if best is None:
+        return None
 
     if offset_x or offset_y:
-        canvas_shape = frame.shape
-        def _paste(view):
-            canvas = np.zeros(canvas_shape, dtype=view.dtype)
-            canvas[offset_y:offset_y + view.shape[0], offset_x:offset_x + view.shape[1]] = view
-            return canvas
+        best["corners"] = best["corners"].copy()
+        best["corners"][:, 0] += offset_x
+        best["corners"][:, 1] += offset_y
 
-        overlay = _paste(overlay)
-        contours_view = _paste(contours_view)
-        blurred = _paste(blurred)
-        hls_view = _paste(hls_view)
-        edges_view = _paste(edges_view)
-        closed_view = _paste(closed_view)
-        opened_view = _paste(opened_view)
+    return best
 
-        cv2.rectangle(
-            overlay,
-            (offset_x, offset_y),
-            (offset_x + w, offset_y + h),
-            (255, 255, 0),
-            2,
-        )
 
-    return {
-        "overlay": overlay,
-        "blur": blurred,
-        "hls": hls_view,
-        "edges": edges_view,
-        "closed": closed_view,
-        "opened": opened_view,
-        "contours": contours_view,
-        "status": status,
-    }
+def _estimate_height_from_bbox(bbox, cm_per_px):
+    x1, y1, x2, y2 = bbox
+    height_px = float(max(0, y2 - y1))
+    height_cm = height_px * cm_per_px
+    return {"height_cm": height_cm, "height_px": height_px, "used_mask": False}
+
+
+def _estimate_height_from_mask(mask: np.ndarray, cm_per_px: float):
+    if mask is None:
+        return None
+    ys, _ = np.where(mask > 0)
+    if ys.size == 0:
+        return None
+    height_px = float(ys.max() - ys.min())
+    height_cm = height_px * cm_per_px
+    return {"height_cm": height_cm, "height_px": height_px, "used_mask": True}
+
+
+def _estimate_human_height(cm_per_px, person_bbox=None, person_mask=None):
+    if person_mask is not None:
+        mask_est = _estimate_height_from_mask(person_mask, cm_per_px)
+        if mask_est is not None:
+            return mask_est
+    if person_bbox is None:
+        return None
+    return _estimate_height_from_bbox(person_bbox, cm_per_px)
+
+
+def _draw_a4_overlay(image: np.ndarray, a4_detection) -> np.ndarray:
+    overlay = image.copy()
+    corners = a4_detection["corners"].astype(int)
+    cv2.polylines(overlay, [corners], True, (0, 255, 255), 2)
+
+    center = corners.mean(axis=0).astype(int)
+    label = (
+        f"A4 {a4_detection['orientation']} "
+        f"{a4_detection['width_px']:.0f}x{a4_detection['height_px']:.0f}px"
+    )
+    cv2.putText(
+        overlay,
+        label,
+        (center[0] - 120, center[1] - 10),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.6,
+        (0, 255, 255),
+        2,
+    )
+    return overlay
 
 
 @app.route("/")
@@ -322,11 +424,6 @@ def index():
 @app.route("/aruco")
 def aruco_page():
     return render_template("aruco.html")
-
-
-@app.route("/a4-debug")
-def a4_debug_page():
-    return render_template("a4_debug.html")
 
 
 @app.route("/api/generate-aruco")
@@ -351,10 +448,6 @@ def handle_start_stream(data=None):
     global cap, streaming, frame_count, person_bbox, is_cut_off, warning_message, distance, focal_length, marker_corners, all_persons, selected_person_idx, detection_mode, last_a4_detection
 
     if streaming:
-        return
-
-    if debug_streaming:
-        emit("error", {"message": "Stop A4 debug before starting the main stream."})
         return
 
     mode = "aruco"
@@ -392,7 +485,7 @@ def handle_start_stream(data=None):
 
 
 def stream_loop():
-    global cap, streaming, frame_count, person_bbox, is_cut_off, distance, focal_length, marker_corners, warning_message, all_persons, selected_person_idx, detection_mode, last_a4_detection
+    global cap, streaming, frame_count, person_bbox, is_cut_off, distance, focal_length, marker_corners, warning_message, all_persons, selected_person_idx, detection_mode, last_a4_detection, a4_seg_model, a4_seg_class, a4_seg_conf
 
     while streaming and cap is not None and cap.isOpened():
         ret, frame = cap.read()
@@ -485,11 +578,14 @@ def stream_loop():
                 marker_corners = None
                 distance = None
                 focal_length = None
-                if person_bbox is not None:
-                    last_a4_detection = detect_a4_paper(
+                if a4_seg_model is not None:
+                    last_a4_detection = _detect_a4_paper_yolo(
+                        a4_seg_model,
                         frame,
                         input_color="bgr",
-                        roi_bbox=tuple(person_bbox),
+                        class_id=a4_seg_class,
+                        conf=a4_seg_conf,
+                        device_override=device,
                     )
                 else:
                     last_a4_detection = None
@@ -510,7 +606,7 @@ def stream_loop():
         if detection_mode == "aruco" and marker_corners is not None:
             cv2.aruco.drawDetectedMarkers(display_frame, marker_corners)
         if detection_mode == "a4" and last_a4_detection is not None:
-            display_frame = draw_a4_overlay(display_frame, last_a4_detection)
+            display_frame = _draw_a4_overlay(display_frame, last_a4_detection)
 
         # Build status info
         status = {
@@ -521,7 +617,7 @@ def stream_loop():
             "aruco_detected": distance is not None if detection_mode == "aruco" else False,
             "distance": round(distance, 1) if distance and detection_mode == "aruco" else None,
             "a4_detected": last_a4_detection is not None if detection_mode == "a4" else False,
-            "a4_cm_per_px": round(last_a4_detection.cm_per_px, 5) if last_a4_detection and detection_mode == "a4" else None,
+            "a4_cm_per_px": round(last_a4_detection["cm_per_px"], 5) if last_a4_detection and detection_mode == "a4" else None,
         }
 
         frame_data = encode_frame(display_frame)
@@ -543,103 +639,6 @@ def handle_stop_stream():
         cap = None
     emit("stream_stopped")
     print("Stream stopped by client")
-
-
-@socketio.on("start_a4_debug")
-def handle_start_a4_debug(data=None):
-    global debug_cap, debug_streaming, a4_debug_params
-
-    if debug_streaming:
-        return
-    if streaming:
-        emit("a4_debug_error", {"message": "Stop the main stream before starting A4 debug."})
-        return
-
-    a4_debug_params = _sanitize_a4_debug_params(data or {})
-
-    debug_cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
-    if not debug_cap.isOpened():
-        debug_cap = cv2.VideoCapture(0)
-    if not debug_cap.isOpened():
-        emit("a4_debug_error", {"message": "Could not open webcam."})
-        return
-
-    debug_streaming = True
-    emit("a4_debug_started")
-    socketio.start_background_task(a4_debug_loop)
-
-
-@socketio.on("stop_a4_debug")
-def handle_stop_a4_debug():
-    global debug_streaming, debug_cap
-    debug_streaming = False
-    if debug_cap:
-        debug_cap.release()
-        debug_cap = None
-    emit("a4_debug_stopped")
-
-
-@socketio.on("update_a4_debug")
-def handle_update_a4_debug(data):
-    global a4_debug_params
-    if not isinstance(data, dict):
-        return
-    merged = a4_debug_params.copy()
-    merged.update(data)
-    a4_debug_params = _sanitize_a4_debug_params(merged)
-
-
-def a4_debug_loop():
-    global debug_cap, debug_streaming, a4_debug_params, debug_last_person_bbox
-
-    while debug_streaming and debug_cap is not None and debug_cap.isOpened():
-        ret, frame = debug_cap.read()
-        if not ret:
-            break
-
-        person_bbox = None
-        if yolo_model is not None:
-            results = yolo_model(frame, classes=[0], device=device, imgsz=320, conf=CONF_THRESHOLD, verbose=False)
-            if len(results[0].boxes) > 0:
-                h, w = frame.shape[:2]
-                frame_center_x = w / 2
-                frame_center_y = h / 2
-                min_dist = float("inf")
-
-                for box in results[0].boxes:
-                    x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
-                    box_center_x = (x1 + x2) / 2
-                    box_center_y = (y1 + y2) / 2
-                    dist = math.hypot(box_center_x - frame_center_x, box_center_y - frame_center_y)
-                    if dist < min_dist:
-                        min_dist = dist
-                        person_bbox = (x1, y1, x2, y2)
-
-        if person_bbox is not None:
-            debug_last_person_bbox = person_bbox
-        else:
-            person_bbox = debug_last_person_bbox
-
-        debug_views = _build_a4_debug_views(frame, a4_debug_params, roi_bbox=person_bbox)
-
-        socketio.emit(
-            "a4_debug_frame",
-            {
-                "overlay": encode_frame(debug_views["overlay"]),
-                "blur": encode_frame(debug_views["blur"]),
-                "hls": encode_frame(debug_views["hls"]),
-                "edges": encode_frame(debug_views["edges"]),
-                "closed": encode_frame(debug_views["closed"]),
-                "opened": encode_frame(debug_views["opened"]),
-                "contours": encode_frame(debug_views["contours"]),
-                "status": debug_views["status"],
-            },
-        )
-        socketio.sleep(0.03)
-
-    if debug_cap:
-        debug_cap.release()
-    debug_streaming = False
 
 
 @socketio.on("capture")
@@ -731,18 +730,24 @@ def handle_capture():
         })
         return
 
-    a4_detection = detect_a4_paper(
+    if a4_seg_model is None:
+        emit("capture_result", {"success": False, "error": "A4 model not loaded"})
+        return
+
+    a4_detection = _detect_a4_paper_yolo(
+        a4_seg_model,
         frame,
         input_color="bgr",
-        roi_bbox=tuple(person_bbox),
+        class_id=a4_seg_class,
+        conf=a4_seg_conf,
+        device_override=device,
     )
     if a4_detection is None:
         emit("capture_result", {"success": False, "error": "No A4 paper detected for scale calibration"})
         return
 
-    height_est = estimate_human_height(
-        frame,
-        a4_detection,
+    height_est = _estimate_human_height(
+        a4_detection["cm_per_px"],
         person_bbox=tuple(person_bbox),
         person_mask=mask,
     )
@@ -751,7 +756,7 @@ def handle_capture():
         emit("capture_result", {"success": False, "error": "Failed to estimate height from A4 scale"})
         return
 
-    result_frame = draw_a4_overlay(result_frame, a4_detection)
+    result_frame = _draw_a4_overlay(result_frame, a4_detection)
 
     if polygon is not None:
         highest_y = int(np.min(polygon[:, 1]))
@@ -762,7 +767,7 @@ def handle_capture():
         highest_y, lowest_y = y1, y2
         center_x = int((x1 + x2) / 2)
 
-    pixel_height = height_est.height_px
+    pixel_height = height_est["height_px"]
 
     cv2.circle(result_frame, (center_x, highest_y), 5, (0, 0, 255), -1)
     cv2.circle(result_frame, (center_x, lowest_y), 5, (0, 0, 255), -1)
@@ -778,24 +783,20 @@ def handle_capture():
     emit("capture_result", {
         "success": True,
         "image": frame_data,
-        "height_cm": round(height_est.height_cm, 1),
+        "height_cm": round(height_est["height_cm"], 1),
         "pixel_height": round(pixel_height, 1),
-        "cm_per_px": round(a4_detection.cm_per_px, 5),
+        "cm_per_px": round(a4_detection["cm_per_px"], 5),
         "detection_mode": "a4",
     })
 
 
 @socketio.on("disconnect")
 def handle_disconnect():
-    global streaming, cap, debug_streaming, debug_cap
+    global streaming, cap
     streaming = False
     if cap:
         cap.release()
         cap = None
-    debug_streaming = False
-    if debug_cap:
-        debug_cap.release()
-        debug_cap = None
     print("Client disconnected")
 
 

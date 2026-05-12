@@ -30,7 +30,7 @@ Notes:
 
 ## A4 segmentation YOLO (optional)
 
-If you have a pretrained segmentation model that can segment A4 sheets, place the weights next to `app.py` and set:
+If you have a pretrained segmentation model that can segment A4 sheets, place the weights next to `app.py` (or provide a path) and set:
 
 ```bash
 set A4_SEG_MODEL=yolo11n-seg.pt
@@ -43,3 +43,9 @@ set A4_SEG_CLASS=0
 ```
 
 When the file is present, A4 mode uses the segmenter; otherwise it falls back to contour detection.
+
+Optional tuning:
+
+```bash
+set A4_SEG_CONF=0.25
+```
