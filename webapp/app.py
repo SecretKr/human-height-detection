@@ -4,7 +4,9 @@ import math
 import numpy as np
 import time
 import base64
+import os
 import torch
+import gdown
 from flask import Flask, render_template, Response, jsonify, request
 from flask_socketio import SocketIO, emit
 from ultralytics import YOLO, SAM
@@ -15,10 +17,12 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
 # --- Global State ---
 yolo_model = None
+card_model = None
 sam_model = None
 device = None
 cap = None
 streaming = False
+detection_mode = "aruco"  # "aruco" or "card"
 
 # ArUco setup
 MARKER_SIZE = 6  # cm
@@ -29,6 +33,7 @@ aruco_detector = aruco.ArucoDetector(marker_dict, param_markers)
 # Detection state
 CONF_THRESHOLD = 0.6
 EDGE_MARGIN = 15
+CARD_REAL_LENGTH = 8.56  # cm — standard ISO ID card
 frame_count = 0
 skip_rate = 3
 person_bbox = None
@@ -39,6 +44,7 @@ focal_length = None
 marker_corners = None
 all_persons = []
 selected_person_idx = -1
+card_bbox = None
 
 
 def get_device():
@@ -53,12 +59,18 @@ def get_device():
 
 
 def load_models():
-    global yolo_model, sam_model, device
+    global yolo_model, card_model, sam_model, device
     device = get_device()
     print(f"Using device: {device}")
     print("Loading YOLO and SAM models...")
     yolo_model = YOLO("yolo26n.pt")
     sam_model = SAM("sam_b.pt")
+    # Load card detection model (download if not present)
+    card_model_path = "yolo26n-card.pt"
+    if not os.path.exists(card_model_path):
+        print("Downloading card detection model...")
+        gdown.download(id="1Hr5vKGWuItkoVsP--1ghqJ2sZiBsSNDL", output=card_model_path)
+    card_model = YOLO(card_model_path)
     print("Models loaded successfully.")
 
 
@@ -94,9 +106,25 @@ def generate_aruco():
     return jsonify({"image": encoded, "id": marker_id, "size": size_px})
 
 
+@app.route("/api/set-mode", methods=["POST"])
+def set_mode():
+    global detection_mode, card_bbox, distance, focal_length, marker_corners
+    data = request.json
+    mode = data.get("mode") if data else None
+    if mode not in ("aruco", "card"):
+        return jsonify({"error": "Invalid mode. Use 'aruco' or 'card'."}), 400
+    detection_mode = mode
+    # Reset reference detection state
+    card_bbox = None
+    distance = None
+    focal_length = None
+    marker_corners = None
+    return jsonify({"mode": detection_mode})
+
+
 @socketio.on("start_stream")
 def handle_start_stream():
-    global cap, streaming, frame_count, person_bbox, is_cut_off, warning_message, distance, focal_length, marker_corners, all_persons, selected_person_idx
+    global cap, streaming, frame_count, person_bbox, is_cut_off, warning_message, distance, focal_length, marker_corners, all_persons, selected_person_idx, card_bbox
 
     if streaming:
         return
@@ -119,6 +147,7 @@ def handle_start_stream():
     marker_corners = None
     all_persons = []
     selected_person_idx = -1
+    card_bbox = None
 
     emit("stream_started")
     print("Stream started")
@@ -128,7 +157,7 @@ def handle_start_stream():
 
 
 def stream_loop():
-    global cap, streaming, frame_count, person_bbox, is_cut_off, distance, focal_length, marker_corners, warning_message, all_persons, selected_person_idx
+    global cap, streaming, frame_count, person_bbox, is_cut_off, distance, focal_length, marker_corners, warning_message, all_persons, selected_person_idx, card_bbox
 
     while streaming and cap is not None and cap.isOpened():
         ret, frame = cap.read()
@@ -141,38 +170,50 @@ def stream_loop():
 
         gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-        # YOLO + ArUco detection on every nth frame
+        # YOLO + reference marker detection on every nth frame
         if frame_count % skip_rate == 0:
+            # Person detection (always at imgsz=320)
             results = yolo_model(frame, classes=[0], device=device, imgsz=320, conf=CONF_THRESHOLD, verbose=False)
 
-            # Detect ArUco markers
-            detected_corners, marker_IDs, _ = aruco_detector.detectMarkers(gray_frame)
-            marker_corners = detected_corners
+            if detection_mode == "aruco":
+                # Detect ArUco markers
+                detected_corners, marker_IDs, _ = aruco_detector.detectMarkers(gray_frame)
+                marker_corners = detected_corners
 
-            if marker_IDs is not None:
-                for ids, corners in zip(marker_IDs, detected_corners):
-                    fl = 0.9 * frame.shape[1]
-                    center = (frame.shape[1] / 2, frame.shape[0] / 2)
-                    cam_mat = np.array(
-                        [[fl, 0, center[0]],
-                         [0, fl, center[1]],
-                         [0, 0, 1]], dtype="double"
-                    )
-                    dist_coef = np.zeros((4, 1))
-                    half = MARKER_SIZE / 2.0
-                    obj_points = np.array([
-                        [-half,  half, 0],
-                        [ half,  half, 0],
-                        [ half, -half, 0],
-                        [-half, -half, 0],
-                    ], dtype=np.float32)
-                    _, rvec, tvec = cv2.solvePnP(obj_points, corners.reshape(4, 2), cam_mat, dist_coef)
-                    tvec = tvec.flatten()
-                    distance = math.sqrt(tvec[0]**2 + tvec[1]**2 + tvec[2]**2)
-                    focal_length = fl
-            else:
-                distance = None
-                focal_length = None
+                if marker_IDs is not None:
+                    for ids, corners in zip(marker_IDs, detected_corners):
+                        fl = 0.9 * frame.shape[1]
+                        center = (frame.shape[1] / 2, frame.shape[0] / 2)
+                        cam_mat = np.array(
+                            [[fl, 0, center[0]],
+                             [0, fl, center[1]],
+                             [0, 0, 1]], dtype="double"
+                        )
+                        dist_coef = np.zeros((4, 1))
+                        half = MARKER_SIZE / 2.0
+                        obj_points = np.array([
+                            [-half,  half, 0],
+                            [ half,  half, 0],
+                            [ half, -half, 0],
+                            [-half, -half, 0],
+                        ], dtype=np.float32)
+                        _, rvec, tvec = cv2.solvePnP(obj_points, corners.reshape(4, 2), cam_mat, dist_coef)
+                        tvec = tvec.flatten()
+                        distance = math.sqrt(tvec[0]**2 + tvec[1]**2 + tvec[2]**2)
+                        focal_length = fl
+                else:
+                    distance = None
+                    focal_length = None
+
+            elif detection_mode == "card":
+                # Detect ID card at high resolution
+                card_results = card_model(frame, imgsz=1280, verbose=False)
+                if len(card_results[0].boxes) > 0:
+                    c_box = card_results[0].boxes[0]
+                    cx1, cy1, cx2, cy2 = map(int, c_box.xyxy[0].tolist())
+                    card_bbox = [cx1, cy1, cx2, cy2]
+                else:
+                    card_bbox = None
 
             if len(results[0].boxes) > 0:
                 frame_center_x = w / 2
@@ -220,25 +261,38 @@ def stream_loop():
         for i, bbox in enumerate(all_persons):
             x1, y1, x2, y2 = bbox
             if i == selected_person_idx:
-                # The selected (centered) person
-                color = (0, 0, 255) if is_cut_off else (0, 255, 0) # Red if cut off, Green if good
+                color = (0, 0, 255) if is_cut_off else (0, 255, 0)
             else:
-                # Other people Yellow
                 color = (0, 255, 255)
-                
             cv2.rectangle(display_frame, (x1, y1), (x2, y2), color, 2)
+            # Label each person with index in card mode (multiple persons)
+            if detection_mode == "card" and len(all_persons) > 1:
+                cv2.putText(display_frame, f"P{i+1}", (x1, y1 - 8),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2)
 
-        # Draw ArUco markers
-        if marker_corners is not None:
+        # Draw ArUco markers (aruco mode only)
+        if detection_mode == "aruco" and marker_corners is not None:
             cv2.aruco.drawDetectedMarkers(display_frame, marker_corners)
+
+        # Draw card bbox (card mode only)
+        if detection_mode == "card" and card_bbox is not None:
+            cx1, cy1, cx2, cy2 = card_bbox
+            cv2.rectangle(display_frame, (cx1, cy1), (cx2, cy2), (0, 255, 255), 2)
+            cv2.putText(display_frame, "Card", (cx1, cy1 - 8),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
         # Build status info
         status = {
+            "mode": detection_mode,
             "person_detected": person_bbox is not None,
+            "person_count": len(all_persons),
             "is_cut_off": is_cut_off,
             "warning": warning_message,
+            # ArUco
             "aruco_detected": distance is not None,
             "distance": round(distance, 1) if distance else None,
+            # Card
+            "card_detected": card_bbox is not None,
         }
 
         frame_data = encode_frame(display_frame)
@@ -264,7 +318,7 @@ def handle_stop_stream():
 
 @socketio.on("capture")
 def handle_capture():
-    global cap, streaming, person_bbox, is_cut_off, distance, focal_length
+    global cap, streaming, person_bbox, is_cut_off, distance, focal_length, all_persons, card_bbox
 
     if not streaming or cap is None or not cap.isOpened():
         emit("capture_result", {"success": False, "error": "Stream not active"})
@@ -278,26 +332,30 @@ def handle_capture():
         emit("capture_result", {"success": False, "error": f"Cannot capture: {warning_message}"})
         return
 
+    if detection_mode == "aruco":
+        _capture_aruco()
+    elif detection_mode == "card":
+        _capture_card()
+
+
+def _capture_aruco():
+    """Capture and measure height using ArUco marker as reference (single person)."""
     if distance is None or focal_length is None:
         emit("capture_result", {"success": False, "error": "No ArUco marker detected for distance calibration"})
         return
 
-    # Grab the current frame
     ret, frame = cap.read()
     if not ret:
         emit("capture_result", {"success": False, "error": "Failed to capture frame"})
         return
 
     h, w = frame.shape[:2]
-
-    # Run SAM segmentation
     pad = 10
     px1, py1 = max(0, person_bbox[0] - pad), max(0, person_bbox[1] - pad)
     px2, py2 = min(w, person_bbox[2] + pad), min(h, person_bbox[3] + pad)
-    padded_bbox = [[px1, py1, px2, py2]]
 
     try:
-        sam_results = sam_model(frame, bboxes=padded_bbox, device=device, verbose=False)
+        sam_results = sam_model(frame, bboxes=[[px1, py1, px2, py2]], device=device, verbose=False)
     except Exception as e:
         emit("capture_result", {"success": False, "error": f"SAM error: {str(e)}"})
         return
@@ -313,11 +371,6 @@ def handle_capture():
         pixel_height = lowest_y - highest_y
         estimated_height = (pixel_height * distance) / focal_length
 
-        # Draw on result frame
-        cv2.circle(result_frame, (center_x, highest_y), 5, (0, 0, 255), -1)
-        cv2.circle(result_frame, (center_x, lowest_y), 5, (0, 0, 255), -1)
-        cv2.line(result_frame, (center_x, highest_y), (center_x, lowest_y), (255, 0, 0), 2)
-
         # Draw mask overlay
         mask = sam_results[0].masks.data[0].cpu().numpy()
         mask_resized = cv2.resize(mask.astype(np.uint8), (w, h))
@@ -325,7 +378,7 @@ def handle_capture():
         overlay[mask_resized > 0] = overlay[mask_resized > 0] * 0.6 + np.array([0, 120, 255]) * 0.4
         result_frame = overlay.astype(np.uint8)
 
-        # Redraw measurement lines on top of overlay
+        # Draw measurement lines on top of overlay
         cv2.circle(result_frame, (center_x, highest_y), 7, (0, 0, 255), -1)
         cv2.circle(result_frame, (center_x, lowest_y), 7, (0, 0, 255), -1)
         cv2.line(result_frame, (center_x, highest_y), (center_x, lowest_y), (255, 255, 0), 2)
@@ -333,6 +386,7 @@ def handle_capture():
         frame_data = encode_frame(result_frame)
         emit("capture_result", {
             "success": True,
+            "mode": "aruco",
             "image": frame_data,
             "height_cm": round(estimated_height, 1),
             "pixel_height": pixel_height,
@@ -340,6 +394,96 @@ def handle_capture():
         })
     else:
         emit("capture_result", {"success": False, "error": "SAM failed to generate mask"})
+
+
+def _capture_card():
+    """Capture and measure height for ALL detected persons using ID card as reference."""
+    if card_bbox is None:
+        emit("capture_result", {"success": False, "error": "No ID card detected. Hold a standard ID card in the scene."})
+        return
+
+    ret, frame = cap.read()
+    if not ret:
+        emit("capture_result", {"success": False, "error": "Failed to capture frame"})
+        return
+
+    h, w = frame.shape[:2]
+
+    # Compute card pixel length from tracked bbox
+    card_w = card_bbox[2] - card_bbox[0]
+    card_h = card_bbox[3] - card_bbox[1]
+    card_pixel_length = max(card_w, card_h)
+
+    if card_pixel_length < 10:
+        emit("capture_result", {"success": False, "error": "Card bounding box too small, reposition card"})
+        return
+
+    persons_to_process = all_persons if all_persons else ([person_bbox] if person_bbox else [])
+
+    result_frame = frame.copy()
+
+    # Draw card bbox on result
+    cx1, cy1, cx2, cy2 = card_bbox
+    cv2.rectangle(result_frame, (cx1, cy1), (cx2, cy2), (0, 255, 255), 2)
+    cv2.putText(result_frame, "Card", (cx1, cy1 - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+
+    person_colors = [(255, 120, 0), (0, 120, 255), (120, 255, 0), (255, 0, 180)]
+    results_list = []
+
+    for i, bbox in enumerate(persons_to_process):
+        pad = 10
+        px1, py1 = max(0, bbox[0] - pad), max(0, bbox[1] - pad)
+        px2, py2 = min(w, bbox[2] + pad), min(h, bbox[3] + pad)
+
+        try:
+            sam_results = sam_model(frame, bboxes=[[px1, py1, px2, py2]], device=device, verbose=False)
+        except Exception:
+            continue
+
+        if sam_results[0].masks is None or len(sam_results[0].masks.xy) == 0:
+            continue
+
+        polygon = sam_results[0].masks.xy[0]
+        highest_y = int(np.min(polygon[:, 1]))
+        lowest_y = int(np.max(polygon[:, 1]))
+        center_x = int(np.mean(polygon[:, 0]))
+
+        pixel_height = lowest_y - highest_y
+        estimated_height = (CARD_REAL_LENGTH * pixel_height) / card_pixel_length
+
+        results_list.append({
+            "person_idx": i + 1,
+            "height_cm": round(estimated_height, 1),
+            "pixel_height": pixel_height,
+        })
+
+        # Draw mask overlay with per-person colour
+        color = person_colors[i % len(person_colors)]
+        mask = sam_results[0].masks.data[0].cpu().numpy()
+        mask_resized = cv2.resize(mask.astype(np.uint8), (w, h))
+        overlay = result_frame.copy()
+        overlay[mask_resized > 0] = overlay[mask_resized > 0] * 0.6 + np.array(color) * 0.4
+        result_frame = overlay.astype(np.uint8)
+
+        # Draw measurement lines
+        cv2.circle(result_frame, (center_x, highest_y), 7, (0, 0, 255), -1)
+        cv2.circle(result_frame, (center_x, lowest_y), 7, (0, 0, 255), -1)
+        cv2.line(result_frame, (center_x, highest_y), (center_x, lowest_y), (255, 255, 0), 2)
+        cv2.putText(result_frame, f"P{i+1}: {estimated_height:.1f} cm",
+                    (center_x + 10, (highest_y + lowest_y) // 2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+
+    if results_list:
+        frame_data = encode_frame(result_frame)
+        emit("capture_result", {
+            "success": True,
+            "mode": "card",
+            "image": frame_data,
+            "persons": results_list,
+            "card_pixel_length": card_pixel_length,
+        })
+    else:
+        emit("capture_result", {"success": False, "error": "SAM failed to generate masks for any person"})
 
 
 @socketio.on("disconnect")
@@ -355,4 +499,4 @@ def handle_disconnect():
 if __name__ == "__main__":
     load_models()
     print("\nStarting web app at http://localhost:5001")
-    socketio.run(app, host="0.0.0.0", port=5001, debug=False)
+    socketio.run(app, host="127.0.0.1", port=5001, debug=False)

@@ -11,7 +11,7 @@
         <!-- Header -->
         <header class="header">
             <h1>Human Height Detection</h1>
-            <p class="subtitle">YOLO &bull; SAM &bull; ArUco</p>
+            <p class="subtitle">YOLO &bull; SAM &bull; ArUco &bull; ID Card</p>
             <nav class="nav-tabs">
                 <a href="/" class="nav-tab active">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg>
@@ -64,6 +64,21 @@
                         Measure Height
                     </button>
                 </div>
+
+                <!-- Detection Mode Selector -->
+                <div class="mode-selector">
+                    <span class="mode-label">Detection Method:</span>
+                    <div class="mode-buttons">
+                        <button class="btn-mode active" data-mode="aruco" id="btnModeAruco">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><rect x="7" y="7" width="3" height="3"/><rect x="14" y="7" width="3" height="3"/><rect x="7" y="14" width="3" height="3"/></svg>
+                            ArUco Marker
+                        </button>
+                        <button class="btn-mode" data-mode="card" id="btnModeCard">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="5" width="20" height="14" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/></svg>
+                            ID Card
+                        </button>
+                    </div>
+                </div>
             </div>
 
             <!-- Info Panel -->
@@ -84,15 +99,21 @@
                                 <span class="dot dot-gray"></span> --
                             </span>
                         </div>
-                        <div class="status-item">
+                        <div class="status-item" id="statusArucoRow">
                             <span class="status-label">ArUco Marker</span>
                             <span class="status-value" id="statusAruco">
                                 <span class="dot dot-gray"></span> --
                             </span>
                         </div>
-                        <div class="status-item">
+                        <div class="status-item" id="statusDistanceRow">
                             <span class="status-label">Distance</span>
                             <span class="status-value" id="statusDistance">--</span>
+                        </div>
+                        <div class="status-item" id="statusCardRow" style="display:none;">
+                            <span class="status-label">ID Card</span>
+                            <span class="status-value" id="statusCard">
+                                <span class="dot dot-gray"></span> --
+                            </span>
                         </div>
                     </div>
                     <div class="warning-bar" id="warningBar" style="display:none;">
@@ -110,30 +131,48 @@
                     <div class="result-image-container">
                         <img id="resultImage" alt="Result">
                     </div>
-                    <div class="result-height" id="resultHeight">--</div>
-                    <div class="result-details">
-                        <div class="detail-row">
-                            <span>Pixel Height</span>
-                            <span id="resultPixels">--</span>
+                    <!-- Single person result (ArUco mode) -->
+                    <div id="resultSingle">
+                        <div class="result-height" id="resultHeight">--</div>
+                        <div class="result-details">
+                            <div class="detail-row">
+                                <span>Pixel Height</span>
+                                <span id="resultPixels">--</span>
+                            </div>
+                            <div class="detail-row">
+                                <span>Distance to Subject</span>
+                                <span id="resultDistance">--</span>
+                            </div>
                         </div>
-                        <div class="detail-row">
-                            <span>Distance to Subject</span>
-                            <span id="resultDistance">--</span>
-                        </div>
+                    </div>
+                    <!-- Multiple persons result (Card mode) -->
+                    <div id="resultMulti" style="display:none;">
+                        <div id="resultPersonsList" class="persons-list"></div>
                     </div>
                     <button class="btn btn-secondary btn-full" id="btnDismiss">Dismiss</button>
                 </div>
 
                 <!-- Instructions Card -->
-                <div class="card">
+                <div class="card" id="instructionsWrapper">
                     <h3>How to Use</h3>
-                    <ol class="instructions-list">
-                        <li>Place a <strong>6cm ArUco marker</strong> (6x6_50 dictionary) visible in the scene</li>
-                        <li>Click <strong>Start Camera</strong> to begin the live feed</li>
-                        <li>Wait for a person & ArUco marker to be detected (green indicators)</li>
-                        <li>Ensure the full body is visible (head to feet)</li>
-                        <li>Click <strong>Measure Height</strong> to capture & estimate</li>
-                    </ol>
+                    <div id="instructionsAruco">
+                        <ol class="instructions-list">
+                            <li>Place a <strong>6cm ArUco marker</strong> (6x6_50 dictionary) visible in the scene</li>
+                            <li>Click <strong>Start Camera</strong> to begin the live feed</li>
+                            <li>Wait for a person &amp; ArUco marker to be detected (green indicators)</li>
+                            <li>Ensure the full body is visible (head to feet)</li>
+                            <li>Click <strong>Measure Height</strong> to capture &amp; estimate</li>
+                        </ol>
+                    </div>
+                    <div id="instructionsCardMode" style="display:none;">
+                        <ol class="instructions-list">
+                            <li>Hold a <strong>standard ID card</strong> (8.56 &times; 5.4 cm) visible in the scene</li>
+                            <li>Click <strong>Start Camera</strong> to begin the live feed</li>
+                            <li>Wait for person(s) &amp; card to be detected (cyan outline on card)</li>
+                            <li>Ensure all persons are fully visible (head to feet)</li>
+                            <li>Click <strong>Measure Height</strong> to measure all detected persons at once</li>
+                        </ol>
+                    </div>
                 </div>
             </div>
         </div>
