@@ -68,33 +68,16 @@ def load_models():
     device = get_device()
     print(f"Using device: {device}")
     print("Loading YOLO and SAM models...")
-
-    # yolo26n.pt — custom person-detection model (must be placed in webapp/)
-    yolo_path = "yolo26n.pt"
-    if not os.path.exists(yolo_path):
-        raise FileNotFoundError(
-            f"Missing model file: {yolo_path}\n"
-            "Place yolo26n.pt in the webapp/ directory before starting."
-        )
-    yolo_model = YOLO(yolo_path)
-
-    # sam_b.pt — downloaded automatically by ultralytics if missing
+    yolo_model = YOLO("yolo26n.pt")
     sam_model = SAM("sam_b.pt")
-
     # Load card detection model (download if not present)
     card_model_path = "yolo26n-card.pt"
     if not os.path.exists(card_model_path):
         print("Downloading card detection model...")
         gdown.download(id="1Hr5vKGWuItkoVsP--1ghqJ2sZiBsSNDL", output=card_model_path)
     card_model = YOLO(card_model_path)
-
     # Load A4 paper OBB detection model
     a4paper_model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "model", "a4paper.pt")
-    if not os.path.exists(a4paper_model_path):
-        raise FileNotFoundError(
-            f"Missing model file: {a4paper_model_path}\n"
-            "Place a4paper.pt in the model/ directory before starting."
-        )
     a4paper_model = YOLO(a4paper_model_path)
     print("Models loaded successfully.")
 
